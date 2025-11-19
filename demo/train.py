@@ -34,11 +34,9 @@ def train_one_epoch(epoch, dataloader, model, criterions, optimizer, device,
 
     # Put model in training mode
     model.train()
-
     l_weight = [[0.05, 2.], [0.05, 2.],
                 [0.01, 1.], [0.01, 1.], [0.01, 4]]
     l_weight0 = [1.0, 1.0, 1.0, 1.3, 1.7]
-
     #l_weight0 = [1.1, 0.7, 1.1, 1.3]  # for bdcn loss2-B4
     #l_weight = [[0.05, 2.], [0.05, 2.], [0.01, 1.],
                 #[0.01, 3.]]  # for cats loss [0.01, 4.]

@@ -30,7 +30,7 @@ class Regression(nn.Module):
         )
 
     def forward(self, x):
-        return self.classifier(self.global_pool(x)).squeeze(1)
+        return self.classifier(self.global_pool(x)).squeeze()
 
 def weight_init(m):
     if isinstance(m, (nn.Conv2d,)):
