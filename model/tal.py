@@ -128,7 +128,66 @@ class TaskAlignedAssigner(nn.Module):
             align_metric (torch.Tensor): Alignment metric with shape (bs, max_num_obj, h*w).
             overlaps (torch.Tensor): Overlaps between predicted vs ground truth boxes with shape (bs, max_num_obj, h*w).
         """
-        mask_in_gts = self.select_candidates_in_gts(anc_points, gt_circles)  # 找出真实框内的锚点（掩码）
+        mask_in_gts = self.select_candidates_in_gts(anc_points, gt_circles)  # 找出真实框内的锚点（掩码）（8, max_objects, 2550000）
+        align_metric, overlaps = self.get_box_metrics(pd_scores, pd_circles, gt_labels, gt_circles, mask_in_gts * mask_gt)
+
+
+
+
+    def get_box_metrics(self, pd_scores, pd_circles, gt_labels, gt_circles, mask_gt):
+        """Compute alignment metric given predicted and ground truth circles.根据预测和真实的圆计算对齐度量
+
+        Args:
+            pd_scores (torch.Tensor): Predicted classification scores with shape (bs, num_total_anchors, num_classes).
+            pd_circles (torch.Tensor): Predicted circles with shape (bs, num_total_anchors, 3).
+            gt_labels (torch.Tensor): Ground truth labels with shape (bs, n_max_boxes, 1).
+            gt_circles (torch.Tensor): Ground truth circles with shape (bs, n_max_boxes, 3).
+            mask_gt (torch.Tensor): Mask for valid ground truth circles with shape (bs, n_max_boxes, 2550000).
+
+        Returns:
+            align_metric (torch.Tensor): Alignment metric combining classification and localization.
+            overlaps (torch.Tensor): IoU overlaps between predicted and ground truth boxes.
+        """
+        na = pd_circles.shape[-2] #2550000
+        mask_gt = mask_gt.bool()  # b, max_num_obj, h*w
+        overlaps = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_circles.dtype, device=pd_circles.device)#GT与预测框的IOU[bs,max_objects,2550000]
+        bbox_scores = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_scores.dtype, device=pd_scores.device)#预测框得分[bs,max_objects,2550000]
+
+        ind = torch.zeros([2, self.bs, self.n_max_boxes], dtype=torch.long)  # 2, b, max_num_obj
+        ind[0] = torch.arange(end=self.bs).view(-1, 1).expand(-1, self.n_max_boxes)  # b, max_num_obj（表示批次索引）
+        ind[1] = gt_labels.squeeze(-1)  # b, max_num_obj（表示真实框的类别）
+        # Get the scores of each grid for each gt cls
+        bbox_scores[mask_gt] = pd_scores[ind[0], :, ind[1]][mask_gt]  # b, max_num_obj, h*w
+
+        # (b, max_num_obj, 1, 4), (b, 1, h*w, 4)
+        pd_circles = pd_circles.unsqueeze(1).expand(-1, self.n_max_boxes, -1, -1)[mask_gt]#(bs,max_objects,2550000,3)*mask_gt->(bs*max_objects*2550000,3)
+        gt_circles = gt_circles.unsqueeze(2).expand(-1, -1, na, -1)[mask_gt]#(bs,max_objects,2550000,3)*mask_gt->(bs*max_objects*2550000,3)
+        overlaps[mask_gt] = self.iou_calculation(gt_circles, pd_circles)#(bs,max_objects,2550000) 计算真实圆与预测圆的IOU
+
+        align_metric = bbox_scores.pow(self.alpha) * overlaps.pow(self.beta)
+        return align_metric, overlaps #(bs,max_objects,2550000) 对齐度量  (bs,max_objects,2550000) IOU
+
+    def iou_calculation(self, gt_circles, pd_circles):
+        """计算真实圆与预测圆的IOU
+
+        Args:
+            gt_circles (torch.Tensor): Ground truth circles with shape (bs*max_objects*2550000, 3).
+            pd_circles (torch.Tensor): Predicted circles with shape (bs*max_objects*2550000, 3).
+
+        Returns:
+            overlaps (torch.Tensor): IoU overlaps between predicted and ground truth circles.
+        """
+        # 计算真实圆与预测圆的IOU
+        x1, y1, r1 = gt_circles.split(1, dim=1)  # (bs*max_objects*2550000, 1)
+        x2, y2, r2 = pd_circles.split(1, dim=1)  # (bs*max_objects*2550000, 1)
+        d = torch.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)  # (bs*max_objects*2550000, 1)
+        r = r1 + r2  # (bs*max_objects*2550000, 1)
+        iou = torch.clamp((r - d) / r, min=0)  # (bs*max_objects*2550000, 1)
+        return iou.squeeze(1)  # (bs*max_objects*2550000,)
+
+
+
+
 
 
     @staticmethod
