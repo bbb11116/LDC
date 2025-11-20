@@ -74,7 +74,7 @@ class YoloCircleLoss(nn.Module):
         # Pboxes
         pred_circles = self.circle_decode(anchor_points, pred_distri)  # xyr, (8, 2550000, 3)
 
-        _, target_bboxes, target_scores, fg_mask, _ = self.assigner(
+        _, target_circles, target_scores, fg_mask, _ = self.assigner(
             # pred_scores.detach().sigmoid() * 0.8 + dfl_conf.unsqueeze(-1) * 0.2,
             pred_scores.detach().sigmoid(),
             (pred_circles.detach() * stride_tensor).type(gt_circles.dtype),
@@ -84,5 +84,52 @@ class YoloCircleLoss(nn.Module):
             mask_gt,
         )
 
+        target_scores_sum = max(target_scores.sum(), 1)
+        # Cls loss
+        loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+
+        # Circle loss
+        if fg_mask.sum():
+            loss[0], loss[2] = self.circle_loss(
+                pred_distri,
+                pred_circles,
+                anchor_points,
+                target_circles / stride_tensor,
+                target_scores,
+                target_scores_sum,
+                fg_mask,
+            )
+
+        loss[0] *= 0.3  # box gain
+        loss[1] *= 0.7  # cls gain
+        loss[2] *= 0.3  # dfl gain
+
+        return loss * batch_size, loss.detach()  # loss(box, cls, dfl)
 
 
+class CircleLoss(nn.Module):
+    """Criterion class for computing training losses for circles."""
+
+    def __init__(self):
+        """Initialize the CircleLoss module with regularization maximum."""
+        super().__init__()
+
+    def forward(
+            self,
+            pred_dist: torch.Tensor,
+            pred_bboxes: torch.Tensor,
+            anchor_points: torch.Tensor,
+            target_bboxes: torch.Tensor,
+            target_scores: torch.Tensor,
+            target_scores_sum: torch.Tensor,
+            fg_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute IoU and DFL losses for bounding boxes."""
+        weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
+        iou = circle_ious(pred_bboxes[fg_mask], target_bboxes[fg_mask])
+        distence = center_distanceLoss(pred_bboxes[fg_mask], target_bboxes[fg_mask])
+        loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
+        loss_dist = ((1.0 - distence) * weight).sum() / target_scores_sum
+
+
+        return loss_iou, loss_dist

@@ -80,7 +80,7 @@ class TaskAlignedAssigner(nn.Module):
             return tuple(t.to(device) for t in result)
 
 
-    def _forward(self, pd_scores, pd_circles, anc_points, gt_labels, gt_bboxes, mask_gt):
+    def _forward(self, pd_scores, pd_circles, anc_points, gt_labels, gt_circles, mask_gt):
         """Compute the task-aligned assignment.
 
         Args:
@@ -98,11 +98,25 @@ class TaskAlignedAssigner(nn.Module):
             fg_mask (torch.Tensor): Foreground mask with shape (bs, num_total_anchors).
             target_gt_idx (torch.Tensor): Target ground truth indices with shape (bs, num_total_anchors).
         """
-        mask_pos, align_metric, overlaps = self.get_pos_mask(
-            pd_scores, pd_circles, gt_labels, gt_bboxes, anc_points, mask_gt
+        mask_pos, align_metric, overlaps, distence= self.get_pos_mask(
+            pd_scores, pd_circles, gt_labels, gt_circles, anc_points, mask_gt
         )  # mask_pos 与真实框匹配的topk个先验框的mask，形状为(bs, max_num_obj, h*w)；
         # align_metric 为真实框与先验框的对齐度量，形状为(bs, max_num_obj, h*w)；
         # overlaps 为预测框与真实框的iou，形状为(bs, max_num_obj, h*w)；
+        # distence 为预测框与真实框的距离，形状为(bs, max_num_obj, h*w)；
+
+        # 选出topk个先验框中最高得分的的下标和掩码
+        target_gt_idx, fg_mask, mask_pos = self.select_highest_overlaps(mask_pos, overlaps, self.n_max_boxes)
+        # Assigned target
+        target_labels, target_circles, target_scores = self.get_targets(gt_labels, gt_circles, target_gt_idx, fg_mask)
+        # Normalize
+        align_metric *= mask_pos
+        pos_align_metrics = align_metric.amax(dim=-1, keepdim=True)  # b, max_num_obj
+        pos_overlaps = (overlaps * mask_pos).amax(dim=-1, keepdim=True)  # b, max_num_obj
+        norm_align_metric = (align_metric * pos_overlaps / (pos_align_metrics + self.eps)).amax(-2).unsqueeze(-1)
+        target_scores = target_scores * norm_align_metric
+        return target_labels, target_circles, target_scores, fg_mask.bool(), target_gt_idx
+
 
 
 
@@ -168,95 +182,11 @@ class TaskAlignedAssigner(nn.Module):
         # (b, max_num_obj, 1, 4), (b, 1, h*w, 4)
         pd_circles = pd_circles.unsqueeze(1).expand(-1, self.n_max_boxes, -1, -1)[mask_gt]#(bs,max_objects,2550000,3)*mask_gt->(bs*max_objects*2550000,3)
         gt_circles = gt_circles.unsqueeze(2).expand(-1, -1, na, -1)[mask_gt]#(bs,max_objects,2550000,3)*mask_gt->(bs*max_objects*2550000,3)
-        overlaps[mask_gt] = self.circle_ious(gt_circles, pd_circles,na)#(bs,max_objects,2550000) 计算真实圆与预测圆的IOU
-        distence[mask_gt] = self.center_distanceLoss(gt_circles, pd_circles,na)#(bs,max_objects,2550000) 计算真实圆与预测圆圆心的距离
+        overlaps[mask_gt] = circle_ious(gt_circles, pd_circles,na)#(bs,max_objects,2550000) 计算真实圆与预测圆的IOU
+        distence[mask_gt] = center_distanceLoss(gt_circles, pd_circles,na)#(bs,max_objects,2550000) 计算真实圆与预测圆圆心的距离
 
         align_metric = circles_scores.pow(self.alpha) * overlaps.pow(self.beta) * distence.pow(self.beta)
         return align_metric, overlaps, distence #(bs,max_objects,2550000) 对齐度量  (bs,max_objects,2550000) IOU (bs,max_objects,2550000) 中心距离损失
-
-    def center_distanceLoss(self, gt_circles, pd_circles,na):
-        """计算真实圆与预测圆的中心距离损失
-
-        Args:
-            gt_circles (torch.Tensor): Ground truth circles with shape (bs*max_objects*2550000, 3).
-            pd_circles (torch.Tensor): Predicted circles with shape (bs*max_objects*2550000, 3).
-
-        Returns:
-            center_distance_loss (torch.Tensor): Center distance loss between predicted and ground truth circles.
-        """
-        x1, y1, r1 = gt_circles.split(1, dim=1)  # (bs*max_objects*2550000, 1)
-        x2, y2, r2 = pd_circles.split(1, dim=1)  # (bs*max_objects*2550000, 1)
-        d = torch.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)  # (bs*max_objects*2550000, 1)
-        r = r1 + r2  # (bs*max_objects*2550000, 1)
-        distance = torch.clamp((r - d) / r, min=0)  # (bs*max_objects*2550000, 1)
-        return distance.squeeze(1).view(self.bs, self.n_max_boxes, na)
-
-
-    def circle_ious(self, gt_circles, pd_circles,na):
-        """
-        🚀 闪电侠级圆交并比（IoU）计算（专为超大批次设计）
-        Args:
-            gt_circles: (N, 3) -> [x, y, r] for ground truth
-            pd_circles: (N, 3) -> [x, y, r] for predictions
-            N = bs * max_objects * 2550000 (任意大小)
-
-        Returns:
-            iou: (N,) IoU 值 (0~1)
-        """
-        # 1️⃣ 提取圆心和半径（0开销切片）
-        c0 = gt_circles[:, :2]  # (N, 2)
-        r0 = gt_circles[:, 2]  # (N,)
-        c1 = pd_circles[:, :2]  # (N, 2)
-        r1 = pd_circles[:, 2]  # (N,)
-        # 2️⃣ 核心：高效计算交集面积（复用之前优化版）
-        inter_area = self.circle_intersection_area_tensor(c0, r0, c1, r1)
-        # 3️⃣ 计算并集面积 = 圆1面积 + 圆2面积 - 交集面积
-        area0 = torch.pi * r0 ** 2
-        area1 = torch.pi * r1 ** 2
-        union_area = area0 + area1 - inter_area
-        # 4️⃣ 计算 IoU (安全处理除以0)
-        iou = inter_area / union_area
-        iou = torch.where(union_area > 0, iou, torch.zeros_like(iou))
-        return iou.view(self.bs, self.n_max_boxes, na)
-
-    def circle_intersection_area_tensor(self,c0, r0, c1, r1):
-        """（同前，已优化到效率天花板）"""
-        d = torch.linalg.norm(c0 - c1, dim=-1)
-        no_inter = d >= r0 + r1
-        contained = d <= torch.abs(r0 - r1)
-        area = torch.zeros_like(d)
-
-        # 包含情况：小圆面积
-        area = torch.where(
-            contained,
-            torch.pi * torch.min(r0, r1) ** 2,
-            area
-        )
-
-        # 仅处理相交样本（95%+样本直接跳过！）
-        mask = (~no_inter) & (~contained)
-        if not mask.any():
-            return area
-
-        # 精准切片
-        dm, r0m, r1m = d[mask], r0[mask], r1[mask]
-
-        # 防浮点误差
-        t0 = (dm ** 2 + r0m ** 2 - r1m ** 2) / (2 * dm * r0m)
-        t1 = (dm ** 2 + r1m ** 2 - r0m ** 2) / (2 * dm * r1m)
-        t0, t1 = t0.clamp(-1.0, 1.0), t1.clamp(-1.0, 1.0)
-
-        # 海伦公式安全计算
-        sq = torch.sqrt(torch.clamp(
-            (-dm + r0m + r1m) * (dm + r0m - r1m) * (dm - r0m + r1m) * (dm + r0m + r1m),
-            min=0.0
-        ))
-
-        # 计算相交面积
-        area_m = r0m ** 2 * torch.acos(t0) + r1m ** 2 * torch.acos(t1) - 0.5 * sq
-        area[mask] = area_m
-
-        return area
 
 
 
@@ -291,6 +221,52 @@ class TaskAlignedAssigner(nn.Module):
 
         return count_tensor.to(metrics.dtype)#将 count_tensor的数据类型转换为与输入 metrics一致后返回。
 
+
+    def get_targets(self, gt_labels, gt_circles, target_gt_idx, fg_mask):
+        """Compute target labels, target circles, and target scores for the positive anchor points.
+
+        Args:
+            gt_labels (torch.Tensor): Ground truth labels of shape (b, max_num_obj, 1), where b is the batch size and
+                max_num_obj is the maximum number of objects.
+            gt_circles (torch.Tensor): Ground truth circles of shape (b, max_num_obj, 3).
+            target_gt_idx (torch.Tensor): Indices of the assigned ground truth objects for positive anchor points, with
+                shape (b, h*w), where h*w is the total number of anchor points.
+            fg_mask (torch.Tensor): A boolean tensor of shape (b, h*w) indicating the positive (foreground) anchor
+                points.
+
+        Returns:
+            target_labels (torch.Tensor): Target labels for positive anchor points with shape (b, h*w).
+            target_circles (torch.Tensor): Target circles for positive anchor points with shape (b, h*w, 3).
+            target_scores (torch.Tensor): Target scores for positive anchor points with shape (b, h*w, num_classes).
+        """
+        # Assigned target labels, (b, 1)
+        batch_ind = torch.arange(end=self.bs, dtype=torch.int64, device=gt_labels.device)[..., None]
+        target_gt_idx = target_gt_idx + batch_ind * self.n_max_boxes  # (b, h*w)
+        target_labels = gt_labels.long().flatten()[target_gt_idx]  # (b, h*w)
+
+        # Assigned target circles, (b, max_num_obj, 3) -> (b, h*w, 3)
+        target_circles = gt_circles.view(-1, gt_circles.shape[-1])[target_gt_idx]
+
+        # Assigned target scores
+        target_labels.clamp_(0)
+
+        # 10x faster than F.one_hot()
+        target_scores = torch.zeros(
+            (target_labels.shape[0], target_labels.shape[1], self.num_classes),
+            dtype=torch.int64,
+            device=target_labels.device,
+        )  # (b, h*w, 80)
+        target_scores.scatter_(2, target_labels.unsqueeze(-1), 1)
+
+        fg_scores_mask = fg_mask[:, :, None].repeat(1, 1, self.num_classes)  # (b, h*w, 80)
+        target_scores = torch.where(fg_scores_mask > 0, target_scores, 0)
+
+        return target_labels, target_circles, target_scores
+        # target_labels：正样本的类别标签（形状(b, h * w)）
+        # target_circles：正样本对应的真实框坐标（形状(b, h * w, 3)）
+        # target_scores：正样本的one - hot类别分数（形状(b, h * w, num_classes)）
+
+
     @staticmethod
     def select_candidates_in_gts(xy_centers, gt_circles, eps=1e-9):
         """Select positive anchor centers within ground truth bounding boxes.
@@ -319,29 +295,127 @@ class TaskAlignedAssigner(nn.Module):
         #                                                                                     -1)  # 计算锚点与真实框的偏移量
         #return bbox_deltas.amin(3).gt_(eps)  # [8,max_objects,2550000] bool掩码
 
-class CircleLoss(nn.Module):
-    """Criterion class for computing training losses for circles."""
+    @staticmethod
+    def select_highest_overlaps(mask_pos, overlaps, n_max_boxes):
+        """Select anchor boxes with highest IoU when assigned to multiple ground truths.
 
-    def __init__(self, reg_max: int = 16):
-        """Initialize the CircleLoss module with regularization maximum."""
-        super().__init__()
-        self.dfl_loss = DFLoss(reg_max) if reg_max > 1 else None
+        Args:
+            mask_pos (torch.Tensor): Positive mask, shape (b, n_max_boxes, h*w).
+            overlaps (torch.Tensor): IoU overlaps, shape (b, n_max_boxes, h*w).
+            n_max_boxes (int): Maximum number of ground truth boxes.
+
+        Returns:
+            target_gt_idx (torch.Tensor): Indices of assigned ground truths, shape (b, h*w).
+            fg_mask (torch.Tensor): Foreground mask, shape (b, h*w).
+            mask_pos (torch.Tensor): Updated positive mask, shape (b, n_max_boxes, h*w).
+        """
+        # Convert (b, n_max_boxes, h*w) -> (b, h*w)
+        fg_mask = mask_pos.sum(-2)
+        if fg_mask.max() > 1:  # one anchor is assigned to multiple gt_bboxes
+            mask_multi_gts = (fg_mask.unsqueeze(1) > 1).expand(-1, n_max_boxes, -1)  # (b, n_max_boxes, h*w)
+            max_overlaps_idx = overlaps.argmax(1)  # (b, h*w)
+
+            is_max_overlaps = torch.zeros(mask_pos.shape, dtype=mask_pos.dtype, device=mask_pos.device)
+            is_max_overlaps.scatter_(1, max_overlaps_idx.unsqueeze(1), 1)
+
+            mask_pos = torch.where(mask_multi_gts, is_max_overlaps, mask_pos).float()  # (b, n_max_boxes, h*w)
+            fg_mask = mask_pos.sum(-2)
+        # Find each grid serve which gt(index)
+        target_gt_idx = mask_pos.argmax(-2)  # (b, h*w)
+        return target_gt_idx, fg_mask, mask_pos
+        # 目标索引 target_gt_idx(b, h*w) 、前景掩码 fg_mask(b, h*w)和更新后的正样本掩码 mask_pose(b, n_max_boxes, h*w)。
+        #target_gt_idx: 每个锚点具体负责第几个物体。
+        #fg_mask: 前景掩码，指示哪些锚点是正样本。
+        #mask_pos: 更新后的正样本掩码，形状为 (b, n_max_boxes, h*w)，用于指示每个锚点是否负责某个真实目标。
 
 
 
 
 
+def center_distanceLoss(self, gt_circles, pd_circles,na):
+    """计算真实圆与预测圆的中心距离损失
+
+    Args:
+        gt_circles (torch.Tensor): Ground truth circles with shape (bs*max_objects*2550000, 3).
+        pd_circles (torch.Tensor): Predicted circles with shape (bs*max_objects*2550000, 3).
+
+    Returns:
+        center_distance_loss (torch.Tensor): Center distance loss between predicted and ground truth circles.
+    """
+    x1, y1, r1 = gt_circles.split(1, dim=1)  # (bs*max_objects*2550000, 1)
+    x2, y2, r2 = pd_circles.split(1, dim=1)  # (bs*max_objects*2550000, 1)
+    d = torch.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)  # (bs*max_objects*2550000, 1)
+    r = r1 + r2  # (bs*max_objects*2550000, 1)
+    distance = torch.clamp((r - d) / r, min=0)  # (bs*max_objects*2550000, 1)
+    return distance.squeeze(1).view(self.bs, self.n_max_boxes, na)
+
+def circle_ious(self, gt_circles, pd_circles,na):
+    """
+    🚀 闪电侠级圆交并比（IoU）计算（专为超大批次设计）
+    Args:
+        gt_circles: (N, 3) -> [x, y, r] for ground truth
+        pd_circles: (N, 3) -> [x, y, r] for predictions
+        N = bs * max_objects * 2550000 (任意大小)
+
+    Returns:
+        iou: (N,) IoU 值 (0~1)
+    """
+    # 1️⃣ 提取圆心和半径（0开销切片）
+    c0 = gt_circles[:, :2]  # (N, 2)
+    r0 = gt_circles[:, 2]  # (N,)
+    c1 = pd_circles[:, :2]  # (N, 2)
+    r1 = pd_circles[:, 2]  # (N,)
+    # 2️⃣ 核心：高效计算交集面积（复用之前优化版）
+    inter_area = self.circle_intersection_area_tensor(c0, r0, c1, r1)
+    # 3️⃣ 计算并集面积 = 圆1面积 + 圆2面积 - 交集面积
+    area0 = torch.pi * r0 ** 2
+    area1 = torch.pi * r1 ** 2
+    union_area = area0 + area1 - inter_area
+    # 4️⃣ 计算 IoU (安全处理除以0)
+    iou = inter_area / union_area
+    iou = torch.where(union_area > 0, iou, torch.zeros_like(iou))
+    return iou.view(self.bs, self.n_max_boxes, na)
+
+def circle_intersection_area_tensor(self,c0, r0, c1, r1):
+    """（同前，已优化到效率天花板）"""
+    d = torch.linalg.norm(c0 - c1, dim=-1)
+    no_inter = d >= r0 + r1
+    contained = d <= torch.abs(r0 - r1)
+    area = torch.zeros_like(d)
+
+    # 包含情况：小圆面积
+    area = torch.where(
+        contained,
+        torch.pi * torch.min(r0, r1) ** 2,
+        area
+    )
+
+    # 仅处理相交样本（95%+样本直接跳过！）
+    mask = (~no_inter) & (~contained)
+    if not mask.any():
+        return area
+
+    # 精准切片
+    dm, r0m, r1m = d[mask], r0[mask], r1[mask]
+
+    # 防浮点误差
+    t0 = (dm ** 2 + r0m ** 2 - r1m ** 2) / (2 * dm * r0m)
+    t1 = (dm ** 2 + r1m ** 2 - r0m ** 2) / (2 * dm * r1m)
+    t0, t1 = t0.clamp(-1.0, 1.0), t1.clamp(-1.0, 1.0)
+
+    # 海伦公式安全计算
+    sq = torch.sqrt(torch.clamp(
+        (-dm + r0m + r1m) * (dm + r0m - r1m) * (dm - r0m + r1m) * (dm + r0m + r1m),
+        min=0.0
+    ))
+
+    # 计算相交面积
+    area_m = r0m ** 2 * torch.acos(t0) + r1m ** 2 * torch.acos(t1) - 0.5 * sq
+    area[mask] = area_m
+
+    return area
 
 
-
-
-class DFLoss(nn.Module):
-    """Criterion class for computing Distribution Focal Loss (DFL)."""
-
-    def __init__(self, reg_max: int = 16) -> None:
-        """Initialize the DFL module with regularization maximum."""
-        super().__init__()
-        self.reg_max = reg_max
 
 
 
