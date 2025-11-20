@@ -2,23 +2,18 @@
 from __future__ import print_function
 
 import argparse
-import os
 import time, platform
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-import cv2
-import numpy as np
-import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from thop import profile
 #from model.mydateset import YSDataset, YSTestDataset
-from model.dataset import *
-from model.dataset import  BipedDataset, TestDataset
-from model.loss2 import *
+from utils.dataset import *
+from utils.dataset import  BipedDataset, TestDataset
+from utils.loss2 import *
 from model.modelB4_side_lifting_2 import LDC_side_lifting
-from utils.img_processing import (image_normalization, save_image_batch_to_disk,
-                   visualize_result, count_parameters)
+from utils.img_processing import (save_image_batch_to_disk,
+                                  visualize_result, count_parameters)
 
 IS_LINUX = True if platform.system()=="Linux" else False
 def train_one_epoch(epoch, dataloader, model, criterions, optimizer, device,

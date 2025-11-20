@@ -2,17 +2,12 @@ from __future__ import print_function
 import argparse
 import os
 import time, platform
-import matplotlib.pyplot as plt
-import sys
-import cv2
 import numpy as np
-import torch.optim as optim
 from torch.utils.data import DataLoader
-from model.dataset import DATASET_NAMES, BipedDataset, TestDataset, dataset_info
-from model.loss2 import *
+from utils.dataset import TestDataset
+from utils.loss2 import *
 from model.modelB4_side_lifting_2 import LDC_side_lifting
-from utils.img_processing import (image_normalization, save_image_batch_to_disk,
-                   visualize_result, count_parameters)
+from utils.img_processing import (save_image_batch_to_disk)
 
 IS_LINUX = True if platform.system()=="Linux" else False
 

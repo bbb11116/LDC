@@ -1,4 +1,4 @@
-from model.mydateset import YSDataset, YSTestDataset
+from utils.mydateset import YSTestDataset
 import matplotlib.pyplot as plt
 import numpy as np
 
