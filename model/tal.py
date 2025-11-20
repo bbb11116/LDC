@@ -129,7 +129,12 @@ class TaskAlignedAssigner(nn.Module):
             overlaps (torch.Tensor): Overlaps between predicted vs ground truth boxes with shape (bs, max_num_obj, h*w).
         """
         mask_in_gts = self.select_candidates_in_gts(anc_points, gt_circles)  # 找出真实框内的锚点（掩码）（8, max_objects, 2550000）
+        # Get anchor_align metric, (b, max_num_obj, h*w)
         align_metric, overlaps, distence = self.get_box_metrics(pd_scores, pd_circles, gt_labels, gt_circles, mask_in_gts * mask_gt)
+        # Get topk_metric mask, (b, max_num_obj, h*w)
+        mask_topk = self.select_topk_candidates(align_metric, topk_mask=mask_gt.expand(-1, -1, self.topk).bool())
+        mask_pos = mask_topk * mask_in_gts * mask_gt
+        return mask_pos, align_metric, overlaps, distence
 
 
 
@@ -254,6 +259,37 @@ class TaskAlignedAssigner(nn.Module):
         return area
 
 
+
+    def select_topk_candidates(self, metrics, topk_mask=None):
+        """Select the top-k candidates based on the given metrics.
+
+        Args:
+            metrics (torch.Tensor): A tensor of shape (b, max_num_obj, h*w), where b is the batch size, max_num_obj is
+                the maximum number of objects, and h*w represents the total number of anchor points.
+            topk_mask (torch.Tensor, optional): An optional boolean tensor of shape (b, max_num_obj, topk), where topk
+                is the number of top candidates to consider. If not provided, the top-k values are automatically
+                computed based on the given metrics.
+
+        Returns:
+            (torch.Tensor): A tensor of shape (b, max_num_obj, h*w) containing the selected top-k candidates.
+        """
+        # (b, max_num_obj, topk)  从255000个锚点中选择topk个得分最高的锚点
+        topk_metrics, topk_idxs = torch.topk(metrics, self.topk, dim=-1, largest=True)
+        if topk_mask is None:
+            topk_mask = (topk_metrics.max(-1, keepdim=True)[0] > self.eps).expand_as(topk_idxs)
+        # (b, max_num_obj, topk)
+        topk_idxs.masked_fill_(~topk_mask, 0)
+
+        # (b, max_num_obj, topk, h*w) -> (b, max_num_obj, h*w)
+        count_tensor = torch.zeros(metrics.shape, dtype=torch.int8, device=topk_idxs.device)
+        ones = torch.ones_like(topk_idxs[:, :, :1], dtype=torch.int8, device=topk_idxs.device)#[b,max_objects,1]
+        for k in range(self.topk):#对于每个真实目标，找到其第 k好的候选锚点在 h*w中的位置，然后在 count_tensor的对应位置上加 1。
+            count_tensor.scatter_add_(-1, topk_idxs[:, :, k : k + 1], ones)
+        # Filter invalid bboxes
+        count_tensor.masked_fill_(count_tensor > 1, 0)#masked_fill_操作将所有计数大于 1 的位置重置为 0。
+                                                            # 这一步确保了每个锚点对于同一个真实目标最多只被计算一次，防御性编程
+
+        return count_tensor.to(metrics.dtype)#将 count_tensor的数据类型转换为与输入 metrics一致后返回。
 
     @staticmethod
     def select_candidates_in_gts(xy_centers, gt_circles, eps=1e-9):
