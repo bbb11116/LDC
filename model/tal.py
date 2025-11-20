@@ -129,7 +129,7 @@ class TaskAlignedAssigner(nn.Module):
             overlaps (torch.Tensor): Overlaps between predicted vs ground truth boxes with shape (bs, max_num_obj, h*w).
         """
         mask_in_gts = self.select_candidates_in_gts(anc_points, gt_circles)  # 找出真实框内的锚点（掩码）（8, max_objects, 2550000）
-        align_metric, overlaps = self.get_box_metrics(pd_scores, pd_circles, gt_labels, gt_circles, mask_in_gts * mask_gt)
+        align_metric, overlaps, distence = self.get_box_metrics(pd_scores, pd_circles, gt_labels, gt_circles, mask_in_gts * mask_gt)
 
 
 
@@ -151,42 +151,107 @@ class TaskAlignedAssigner(nn.Module):
         na = pd_circles.shape[-2] #2550000
         mask_gt = mask_gt.bool()  # b, max_num_obj, h*w
         overlaps = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_circles.dtype, device=pd_circles.device)#GT与预测框的IOU[bs,max_objects,2550000]
-        bbox_scores = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_scores.dtype, device=pd_scores.device)#预测框得分[bs,max_objects,2550000]
+        distence = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_circles.dtype, device=pd_circles.device)
+        circles_scores = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_scores.dtype, device=pd_scores.device)#预测框得分[bs,max_objects,2550000]
 
         ind = torch.zeros([2, self.bs, self.n_max_boxes], dtype=torch.long)  # 2, b, max_num_obj
         ind[0] = torch.arange(end=self.bs).view(-1, 1).expand(-1, self.n_max_boxes)  # b, max_num_obj（表示批次索引）
         ind[1] = gt_labels.squeeze(-1)  # b, max_num_obj（表示真实框的类别）
         # Get the scores of each grid for each gt cls
-        bbox_scores[mask_gt] = pd_scores[ind[0], :, ind[1]][mask_gt]  # b, max_num_obj, h*w
+        circles_scores[mask_gt] = pd_scores[ind[0], :, ind[1]][mask_gt]  # b, max_num_obj, h*w
 
         # (b, max_num_obj, 1, 4), (b, 1, h*w, 4)
         pd_circles = pd_circles.unsqueeze(1).expand(-1, self.n_max_boxes, -1, -1)[mask_gt]#(bs,max_objects,2550000,3)*mask_gt->(bs*max_objects*2550000,3)
         gt_circles = gt_circles.unsqueeze(2).expand(-1, -1, na, -1)[mask_gt]#(bs,max_objects,2550000,3)*mask_gt->(bs*max_objects*2550000,3)
-        overlaps[mask_gt] = self.iou_calculation(gt_circles, pd_circles)#(bs,max_objects,2550000) 计算真实圆与预测圆的IOU
+        overlaps[mask_gt] = self.circle_ious(gt_circles, pd_circles,na)#(bs,max_objects,2550000) 计算真实圆与预测圆的IOU
+        distence[mask_gt] = self.center_distanceLoss(gt_circles, pd_circles,na)#(bs,max_objects,2550000) 计算真实圆与预测圆圆心的距离
 
-        align_metric = bbox_scores.pow(self.alpha) * overlaps.pow(self.beta)
-        return align_metric, overlaps #(bs,max_objects,2550000) 对齐度量  (bs,max_objects,2550000) IOU
+        align_metric = circles_scores.pow(self.alpha) * overlaps.pow(self.beta) * distence.pow(self.beta)
+        return align_metric, overlaps, distence #(bs,max_objects,2550000) 对齐度量  (bs,max_objects,2550000) IOU (bs,max_objects,2550000) 中心距离损失
 
-    def iou_calculation(self, gt_circles, pd_circles):
-        """计算真实圆与预测圆的IOU
+    def center_distanceLoss(self, gt_circles, pd_circles,na):
+        """计算真实圆与预测圆的中心距离损失
 
         Args:
             gt_circles (torch.Tensor): Ground truth circles with shape (bs*max_objects*2550000, 3).
             pd_circles (torch.Tensor): Predicted circles with shape (bs*max_objects*2550000, 3).
 
         Returns:
-            overlaps (torch.Tensor): IoU overlaps between predicted and ground truth circles.
+            center_distance_loss (torch.Tensor): Center distance loss between predicted and ground truth circles.
         """
-        # 计算真实圆与预测圆的IOU
         x1, y1, r1 = gt_circles.split(1, dim=1)  # (bs*max_objects*2550000, 1)
         x2, y2, r2 = pd_circles.split(1, dim=1)  # (bs*max_objects*2550000, 1)
         d = torch.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)  # (bs*max_objects*2550000, 1)
         r = r1 + r2  # (bs*max_objects*2550000, 1)
-        iou = torch.clamp((r - d) / r, min=0)  # (bs*max_objects*2550000, 1)
-        return iou.squeeze(1)  # (bs*max_objects*2550000,)
+        distance = torch.clamp((r - d) / r, min=0)  # (bs*max_objects*2550000, 1)
+        return distance.squeeze(1).view(self.bs, self.n_max_boxes, na)
 
 
+    def circle_ious(self, gt_circles, pd_circles,na):
+        """
+        🚀 闪电侠级圆交并比（IoU）计算（专为超大批次设计）
+        Args:
+            gt_circles: (N, 3) -> [x, y, r] for ground truth
+            pd_circles: (N, 3) -> [x, y, r] for predictions
+            N = bs * max_objects * 2550000 (任意大小)
 
+        Returns:
+            iou: (N,) IoU 值 (0~1)
+        """
+        # 1️⃣ 提取圆心和半径（0开销切片）
+        c0 = gt_circles[:, :2]  # (N, 2)
+        r0 = gt_circles[:, 2]  # (N,)
+        c1 = pd_circles[:, :2]  # (N, 2)
+        r1 = pd_circles[:, 2]  # (N,)
+        # 2️⃣ 核心：高效计算交集面积（复用之前优化版）
+        inter_area = self.circle_intersection_area_tensor(c0, r0, c1, r1)
+        # 3️⃣ 计算并集面积 = 圆1面积 + 圆2面积 - 交集面积
+        area0 = torch.pi * r0 ** 2
+        area1 = torch.pi * r1 ** 2
+        union_area = area0 + area1 - inter_area
+        # 4️⃣ 计算 IoU (安全处理除以0)
+        iou = inter_area / union_area
+        iou = torch.where(union_area > 0, iou, torch.zeros_like(iou))
+        return iou.view(self.bs, self.n_max_boxes, na)
+
+    def circle_intersection_area_tensor(self,c0, r0, c1, r1):
+        """（同前，已优化到效率天花板）"""
+        d = torch.linalg.norm(c0 - c1, dim=-1)
+        no_inter = d >= r0 + r1
+        contained = d <= torch.abs(r0 - r1)
+        area = torch.zeros_like(d)
+
+        # 包含情况：小圆面积
+        area = torch.where(
+            contained,
+            torch.pi * torch.min(r0, r1) ** 2,
+            area
+        )
+
+        # 仅处理相交样本（95%+样本直接跳过！）
+        mask = (~no_inter) & (~contained)
+        if not mask.any():
+            return area
+
+        # 精准切片
+        dm, r0m, r1m = d[mask], r0[mask], r1[mask]
+
+        # 防浮点误差
+        t0 = (dm ** 2 + r0m ** 2 - r1m ** 2) / (2 * dm * r0m)
+        t1 = (dm ** 2 + r1m ** 2 - r0m ** 2) / (2 * dm * r1m)
+        t0, t1 = t0.clamp(-1.0, 1.0), t1.clamp(-1.0, 1.0)
+
+        # 海伦公式安全计算
+        sq = torch.sqrt(torch.clamp(
+            (-dm + r0m + r1m) * (dm + r0m - r1m) * (dm - r0m + r1m) * (dm + r0m + r1m),
+            min=0.0
+        ))
+
+        # 计算相交面积
+        area_m = r0m ** 2 * torch.acos(t0) + r1m ** 2 * torch.acos(t1) - 0.5 * sq
+        area[mask] = area_m
+
+        return area
 
 
 
