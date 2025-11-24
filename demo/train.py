@@ -8,13 +8,14 @@ from tqdm import tqdm
 import torch.optim as optim
 from torch.utils.data import DataLoader
 #from model.mydateset import YSDataset, YSTestDataset
-from utils.dataset import *
-from utils.dataset import  BipedDataset, TestDataset
+#from utils.dataset import *
+from utils.dataset_all import *
+from utils.circle_dataset import *
 from utils.loss2 import *
 from model.modelB4_side_lifting_2 import LDC_side_lifting
 from utils.img_processing import (save_image_batch_to_disk,
                                   visualize_result, count_parameters)
-
+from utils.yolo_circleLoss import YoloCircleLoss
 IS_LINUX = True if platform.system()=="Linux" else False
 def train_one_epoch(epoch, dataloader, model, criterions, optimizer, device,
                     log_interval_vis, tb_writer, args=None):
@@ -23,7 +24,7 @@ def train_one_epoch(epoch, dataloader, model, criterions, optimizer, device,
     os.makedirs(imgs_res_folder,exist_ok=True)
 
     if isinstance(criterions, list):    # 如果criterions是list,则执行判断
-        criterion1, criterion2, criterion3, criterion4 = criterions
+        criterion1, criterion2, criterion3, criterion4, criterion5 = criterions
     else:
         criterion1 = criterions
 
@@ -32,22 +33,18 @@ def train_one_epoch(epoch, dataloader, model, criterions, optimizer, device,
     l_weight = [[0.05, 2.], [0.05, 2.],
                 [0.01, 1.], [0.01, 1.], [0.01, 4]]
     l_weight0 = [1.0, 1.0, 1.0, 1.3, 1.7]
-    #l_weight0 = [1.1, 0.7, 1.1, 1.3]  # for bdcn loss2-B4
-    #l_weight = [[0.05, 2.], [0.05, 2.], [0.01, 1.],
-                #[0.01, 3.]]  # for cats loss [0.01, 4.]
-
-    # l_weight = [[0.05, 2.], [0.05, 2.], [0.05, 2.],
-    #             [0.1, 1.], [0.1, 1.], [0.1, 1.],
-    #             [0.01, 4.]]  # for cats loss
     loss_avg =[]
     for batch_id, sample_batched in enumerate(dataloader):
         images = sample_batched['images'].to(device)  # BxCxHxW   图像信息
         labels = sample_batched['labels'].to(device)  # BxHxW  labels信息
-        preds_list = model(images)
+
+        preds_list,circle_list = model(images)
         assert len(preds_list) == len(l_weight), "长度不匹配"
 
         loss_4 = sum([criterion4(preds, labels, l_w) for preds, l_w in zip(preds_list[:-1], l_weight0)])  # bdcn_loss2 [1,2,3] TEED
         loss_1 = criterion1(preds_list[-1], labels, l_weight[-1], device)  # cats_loss [dfuse] TEED
+        loss_5 = criterion5(preds = circle_list, batch = sample_batched)  # yolo_circleLoss [dfuse] TEED
+
 
 
         # loss = sum([criterion2(preds, labels,l_w) for preds, l_w in zip(preds_list[:-1],l_weight0)]) # bdcn_loss2
@@ -55,7 +52,7 @@ def train_one_epoch(epoch, dataloader, model, criterions, optimizer, device,
         #loss_3 = sum([criterion2(preds, labels, l_w, device) for preds, l_w in zip(preds_list, l_weight0)])
         loss_2 = criterion2(preds_list[-1], labels, l_weight0[-1], device)
         #loss_4 = sum([criterion3(preds, labels, lweight = l_w) for preds, l_w in zip(preds_list, l_weight0)])
-        loss = (loss_1 + loss_4 + loss_2*0.25)
+        loss = (loss_1 + loss_4 + loss_2*0.25 + loss_5)
 
         optimizer.zero_grad()   # 将梯度归零
         loss.backward()         # 反向传播计算每个参数的梯度值
@@ -111,7 +108,7 @@ def train_one_epoch(epoch, dataloader, model, criterions, optimizer, device,
 def validate_one_epoch(criterions, dataloader, model, device, output_dir, arg=None):
     # XXX This is not really validation, but testing
     if isinstance(criterions, list):    # 如果criterions是list,则执行判断
-        criterion1, criterion2, criterion3, criterion4 = criterions
+        criterion1, criterion2, criterion3, criterion4, criterion5 = criterions
     else:
         criterion1 = criterions
     l_weight = [[0.05, 2.], [0.05, 2.],
@@ -128,21 +125,23 @@ def validate_one_epoch(criterions, dataloader, model, device, output_dir, arg=No
             labels = sample_batched['labels'].to(device)
             file_names = sample_batched['file_names']
             image_shape = sample_batched['image_shape']
-            preds_list = model(images)
+            preds_list,circle_list = model(images)
 
             loss_4 = sum([criterion4(preds, labels, l_w) for preds, l_w in zip(preds_list[:-1], l_weight0)])  # bdcn_loss2 [1,2,3] TEED
             loss_1 = criterion1(preds_list[-1], labels, l_weight[-1], device)  # cats_loss [dfuse] TEED
+            loss_5 = criterion5(preds = circle_list, batch = sample_batched)
 
             # loss = sum([criterion2(preds, labels,l_w) for preds, l_w in zip(preds_list[:-1],l_weight0)]) # bdcn_loss2
             # loss_1 = sum([criterion1(preds, labels, l_w, device) for preds, l_w in zip(preds_list, l_weight)])  # cats_loss   计算损失
             # loss_3 = sum([criterion2(preds, labels, l_w, device) for preds, l_w in zip(preds_list, l_weight0)])
             loss_2 = criterion2(preds_list[-1], labels, l_weight0[-1], device)
             # loss_4 = sum([criterion3(preds, labels, lweight = l_w) for preds, l_w in zip(preds_list, l_weight0)])
-            loss = (loss_1 + loss_4 + loss_2*0.25)
+            loss = (loss_1 + loss_4 + loss_2*0.25 + loss_5)
             val_loss_avg.append(loss.item())
             # print('pred shape', preds[0].shape)
             # 将预测的结果图像存储到对应的文件中
             save_image_batch_to_disk(preds_list[-1],
+                                     circle_list,
                                      output_dir,
                                      file_names, img_shape=image_shape,
                                      arg=arg)
@@ -246,6 +245,14 @@ def parse_args():
                         type=str,
                         default=r'F:\CS\ys\YS\Model training\Data\data_con',
                         help='the path to the directory with the input data.')
+    parser.add_argument('--json_train',  # 训练数据路径
+                        type=str,
+                        default=r'train.json',
+                        help='the path to the json file.')
+    parser.add_argument('--json_test',  # 测试数据路径
+                        type=str,
+                        default=r'test.json',
+                        help='the path to the json file.')
     parser.add_argument('--output_dir',    #训练结果路径
                         type=str,
                         default='checkpoints/checkpoints_ALL_9.30',
@@ -405,6 +412,7 @@ def main(args):
             model.load_state_dict(torch.load(args.checkpoint_path,
                                          map_location=device))
         dataset_train = BipedDataset(args.input_dir,
+                                     os.path.join(args.output_dir,args.train_data,args.json_train),
                                      img_width=args.img_width,
                                      img_height=args.img_height,
                                      mean_bgr=args.mean_pixel_values[0:3] if len(
@@ -416,9 +424,10 @@ def main(args):
         dataloader_train = DataLoader(dataset_train,
                                       batch_size=args.batch_size,
                                       shuffle=True,
-                                      num_workers=args.workers)
-
+                                      num_workers=args.workers,
+                                      collate_fn=custom_collate_fn)
     dataset_val = TestDataset(args.input_dir,
+                              os.path.join(args.output_dir,args.train_data,args.json_test),
                               test_data=args.train_data,
                               img_width=args.test_img_width,
                               img_height=args.test_img_height,
@@ -459,8 +468,9 @@ def main(args):
         hard_weight=3.0,
         hard_gamma=2.0
     )
+    criterion5 = YoloCircleLoss()
     criterion4 = bdcn_loss2
-    criterion = [criterion1, criterion2, criterion3, criterion4]
+    criterion = [criterion1, criterion2, criterion3, criterion4,criterion5]
     optimizer = optim.Adam(model.parameters(),
                            lr=args.lr,
                            weight_decay=args.wd)

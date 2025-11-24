@@ -5,6 +5,8 @@ import numpy as np
 import torch
 import kornia as kn
 
+from model.model import *
+
 
 def image_normalization(img, img_min=0, img_max=255,
                         epsilon=1e-12):
@@ -34,7 +36,7 @@ def count_parameters(model=None):
         raise NotImplementedError
 
 
-def save_image_batch_to_disk(tensor, output_dir, file_names,
+def save_image_batch_to_disk(tensor, circle_list, output_dir, file_names,
                              img_shape=None, arg=None, is_inchannel=False):
 
     os.makedirs(output_dir, exist_ok=True)
@@ -48,6 +50,21 @@ def save_image_batch_to_disk(tensor, output_dir, file_names,
             image_vis = (255.0*(1.0 - image_vis)).astype(np.uint8)
             output_file_name = os.path.join(output_dir, file_name)
             image_vis =cv2.resize(image_vis, dsize=(img_shape[1].numpy()[0], img_shape[0].numpy()[0]))
+            circle = PostProcess(circle_list)
+            final_results_circle = final_results(circle)
+            for circles in final_results_circle:
+                cv2.circle(image_vis, (int(circles[0]), int(circles[1])), int(circles[2]), (0, 255, 0), 2)
+                cv2.putText(
+                    image_vis,
+                    text=f'X:{int(circles[0])},Y:{int(circles[1])},Radius: {int(circles[2])},Conf: {circles[3]:.2f},CLS: {circles[4]:.2f}',
+                    org=(int(circles[0])+10, int(circles[1])+10),
+                    fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                    fontScale=1.0,
+                    color=(0, 255, 0),  # BGR 格式：绿色
+                    thickness=2,
+                    lineType=cv2.LINE_AA  # 抗锯齿
+                )
+
             # image_vis =cv2.resize(image_vis, dsize=(img_shape[1], img_shape[0]))
             assert cv2.imwrite(output_file_name, image_vis)
     else:
@@ -155,6 +172,20 @@ def save_image_batch_to_disk(tensor, output_dir, file_names,
             # Get the mean prediction of all the 7 outputs
             #average = np.array(preds, dtype=np.float32)
             #average = np.uint8(np.mean(average, axis=0))
+            circle = PostProcess(circle_list)
+            final_results_circle = final_results(circle)
+            for circles in final_results_circle:
+                cv2.circle(fuse, (int(circles[0]), int(circles[1])), int(circles[2]), (0, 255, 0), 2)
+                cv2.putText(
+                    fuse,
+                    text=f'X:{int(circles[0])},Y:{int(circles[1])},Radius: {int(circles[2])},Conf: {circles[3]:.2f},CLS: {circles[4]:.2f}',
+                    org=(int(circles[0]) + 10, int(circles[1]) + 10),
+                    fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                    fontScale=1.0,
+                    color=(0, 255, 0),  # BGR 格式：绿色
+                    thickness=2,
+                    lineType=cv2.LINE_AA  # 抗锯齿
+                )
             output_file_name_f = os.path.join(output_dir, file_name)
             #output_file_name_a = os.path.join(output_dir_a, file_name)
             cv2.imwrite(output_file_name_f, fuse)

@@ -52,7 +52,7 @@ class YoloCircleLoss(nn.Module):
         return dist2circle(pred_dist, anchor_points)
 
 
-    def __call__(self,  preds, batch: dict[str, torch.Tensor]):
+    def __call__(self,  preds: list[torch.Tensor], batch: dict[str, torch.Tensor]):
         loss = torch.zeros(3, device=self.device)  # box, cls, dfl
         feats = preds[1] if isinstance(preds, tuple) else preds
         pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
@@ -72,7 +72,7 @@ class YoloCircleLoss(nn.Module):
         mask_gt = gt_circles.sum(2, keepdim=True).gt_(0.0)
 
         # Pboxes
-        pred_circles = self.circle_decode(anchor_points, pred_distri)  # xyr, (8, 2550000, 3)
+        pred_circles = self.clrcle_decode(anchor_points, pred_distri)  # xyr, (8, 2550000, 3)
 
         _, target_circles, target_scores, fg_mask, _ = self.assigner(
             # pred_scores.detach().sigmoid() * 0.8 + dfl_conf.unsqueeze(-1) * 0.2,

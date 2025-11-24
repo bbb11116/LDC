@@ -1,15 +1,14 @@
 import os
 import random
+from pathlib import Path
 
 import cv2
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 import json
-
-
-BIPED_mean = [114.510, 114.451,117.230,137.86]
-
+from utils.circle_dataset import *
+BIPED_mean = [114.510, 114.451, 117.230, 137.86]
 
 
 class TestDataset(Dataset):
@@ -31,6 +30,11 @@ class TestDataset(Dataset):
         self.img_height = img_height
         self.img_width = img_width
         self.data_index = self._build_index()
+        with open(json_path, 'r', encoding='utf-8') as f:
+            self.data = json.load(f)
+
+            # 将 images 字典的 key 转为 list，方便索引
+        self.image_names = list(self.data['images'].keys())
 
         print(f"mean_bgr: {self.mean_bgr}")
         print(f"{test_data} 数据集加载完成，共 {len(self)} 个样本")
@@ -96,6 +100,27 @@ class TestDataset(Dataset):
                 label_path = None
 
         # 加载图像
+        p = Path(image_path)
+        file_name = p.name
+        img_info = self.data['images'][file_name]
+        w = img_info['imageSize']['width']
+        h = img_info['imageSize']['height']
+        shape = torch.tensor([h, w])
+        # 2. 获取圆的信息 [cx, cy, r]
+        circles_data = img_info['circles']
+        circles_id = img_info['circles_id']
+        circles = []
+        for c in circles_data:
+            circles.append([c['cx'] / w, c['cy'] / h, c['r'] / torch.sqrt(w ** 2 + h ** 2)])
+
+        # 转为 Tensor，如果该图没有圆，则为空 Tensor
+        if len(circles) > 0:
+            circles = torch.tensor(circles, dtype=torch.float32)
+            # 3. 创建类别 Tensor (所有圆都是同一个类别)
+            cls = torch.full((len(circles), 1), circles_id, dtype=torch.float32)
+        else:
+            circles = torch.zeros((0, 3), dtype=torch.float32)
+            cls = torch.zeros((0, 1), dtype=torch.float32)
         image = cv2.imread(image_path, cv2.IMREAD_COLOR)
         if image is None:
             raise IOError(
@@ -122,7 +147,10 @@ class TestDataset(Dataset):
             images=image,
             labels=label,
             file_names=file_name,
-            image_shape=im_shape
+            image_shape=im_shape,
+            shapes=shape,
+            circles=circles,
+            cls=cls
         )
 
     def transform(self, img, gt):
@@ -177,6 +205,7 @@ class BipedDataset(Dataset):
 
     def __init__(self,
                  data_root,
+                 json_path,
                  img_height,
                  img_width,
                  mean_bgr,
@@ -197,6 +226,11 @@ class BipedDataset(Dataset):
         self.crop_img = crop_img
         self.arg = arg
         self.data_index = self._build_index()
+        with open(json_path, 'r', encoding='utf-8') as f:
+            self.data = json.load(f)
+
+            # 将 images 字典的 key 转为 list，方便索引
+        self.image_names = list(self.data['images'].keys())
 
     def _build_index(self):
         assert self.train_mode in self.train_modes, self.train_mode
@@ -251,8 +285,6 @@ class BipedDataset(Dataset):
                         (os.path.join(data_root, tmp_img),
                          os.path.join(data_root, tmp_gt),))
 
-
-
         return sample_indices
 
     def __len__(self):
@@ -260,13 +292,35 @@ class BipedDataset(Dataset):
 
     def __getitem__(self, idx):
         # get data sample
-        image_path, label_path ,circles = self.data_index[idx]
+        image_path, label_path, circles = self.data_index[idx]
+        p = Path(image_path)
+        file_name = p.name
+        img_info = self.data['images'][file_name]
+        w = img_info['imageSize']['width']
+        h = img_info['imageSize']['height']
+        shape = torch.tensor([h, w])
+        # 2. 获取圆的信息 [cx, cy, r]
+        circles_data = img_info['circles']
+        circles_id = img_info['circles_id']
+        circles = []
+        for c in circles_data:
+            circles.append([c['cx'] / w, c['cy'] / h, c['r'] / torch.sqrt(w ** 2 + h ** 2)])
+
+        # 转为 Tensor，如果该图没有圆，则为空 Tensor
+        if len(circles) > 0:
+            circles = torch.tensor(circles, dtype=torch.float32)
+            # 3. 创建类别 Tensor (所有圆都是同一个类别)
+            cls = torch.full((len(circles), 1), circles_id, dtype=torch.float32)
+        else:
+            circles = torch.zeros((0, 3), dtype=torch.float32)
+            cls = torch.zeros((0, 1), dtype=torch.float32)
         # load data
         image = cv2.imread(image_path, cv2.IMREAD_COLOR)
         label = cv2.imread(label_path, cv2.IMREAD_GRAYSCALE)
 
+
         image, label = self.transform(img=image, gt=label)
-        return dict(images=image, labels=label )
+        return dict(im_file=file_name, shape=shape, images=image, labels=label, circles=circles, cls=cls)
 
     def transform(self, img, gt):
         gt = np.array(gt, dtype=np.float32)
