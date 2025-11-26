@@ -58,51 +58,54 @@ def custom_collate_fn(batch):
     """
     自定义整理函数，将多个样本的数据整合成你需要的 batch 字典格式
     """
+    im_file_list = []
+    shape_list = []
+    images_list = []        # ← 新增：收集 images
+    labels_list = []        # ← 新增：收集 labels
+
     batch_idx_list = []
     cls_list = []
     circles_list = []
-    im_file_list = []
-    shape_list = []
 
     for i, item in enumerate(batch):
-        # 处理文件名和形状
+        # 收集通用字段
         im_file_list.append(item['im_file'])
         shape_list.append(item['shape'])
+        images_list.append(item['images'])      # ← 新增
+        labels_list.append(item['labels'])      # ← 新增
 
-        # 获取当前图片的圆和类别
-        # item['circles'] shape: [n, 3]
+        # 处理 circles 相关（保持原有逻辑）
         num_circles = item['circles'].shape[0]
-
         if num_circles > 0:
-            # 1. 生成 batch_id，对应这里的 i
-            # view(-1, 1) 是为了变成列向量，方便后续 concat
             b_idx = torch.full((num_circles, 1), i, dtype=torch.float32)
             batch_idx_list.append(b_idx)
-
-            # 2. 收集类别和圆信息
             cls_list.append(item['cls'])
             circles_list.append(item['circles'])
 
-    # 将列表拼接成 Tensor
+    # 堆叠 images 和 labels（假设它们是 tensor）
+    images_tensor = torch.stack(images_list, dim=0)  # [B, C, H, W]
+    labels_tensor = torch.stack(labels_list, dim=0)  # 根据你的 label 形状调整
+
+    # 处理 circles 部分（保持原有逻辑）
     if len(batch_idx_list) > 0:
-        batch_idx_tensor = torch.cat(batch_idx_list, dim=0)  # [Total_Circles, 1]
-        cls_tensor = torch.cat(cls_list, dim=0)  # [Total_Circles, 1]
-        circles_tensor = torch.cat(circles_list, dim=0)  # [Total_Circles, 3]
+        batch_idx_tensor = torch.cat(batch_idx_list, dim=0)
+        cls_tensor = torch.cat(cls_list, dim=0)
+        circles_tensor = torch.cat(circles_list, dim=0)
     else:
-        # 防止整个 batch 没有任何圆的情况
         batch_idx_tensor = torch.zeros((0, 1))
         cls_tensor = torch.zeros((0, 1))
         circles_tensor = torch.zeros((0, 3))
 
     shapes_tensor = torch.stack(shape_list, dim=0)
 
-    # 返回符合你要求的字典
     return {
         "batch_idx": batch_idx_tensor,
         "cls": cls_tensor,
         "circles": circles_tensor,
         "im_file": im_file_list,
-        "shape": shapes_tensor
+        "shape": shapes_tensor,
+        "images": images_tensor,     # ← 新增返回
+        "labels": labels_tensor,     # ← 新增返回
     }
 
 

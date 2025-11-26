@@ -4,9 +4,8 @@ import cv2
 import numpy as np
 import torch
 import kornia as kn
-
 from model.model import *
-
+from utils.tal import *
 
 def image_normalization(img, img_min=0, img_max=255,
                         epsilon=1e-12):
@@ -41,6 +40,7 @@ def save_image_batch_to_disk(tensor, circle_list, output_dir, file_names,
 
     os.makedirs(output_dir, exist_ok=True)
     predict_all = arg.predict_all
+    # 在 img_processing.py 第 52 行之前
     if not arg.is_testing:
         assert len(tensor.shape) == 4, tensor.shape
         # img_shape = np.array(img_shape)
@@ -49,21 +49,53 @@ def save_image_batch_to_disk(tensor, circle_list, output_dir, file_names,
                 torch.sigmoid(tensor_image))#[..., 0]
             image_vis = (255.0*(1.0 - image_vis)).astype(np.uint8)
             output_file_name = os.path.join(output_dir, file_name)
-            image_vis =cv2.resize(image_vis, dsize=(img_shape[1].numpy()[0], img_shape[0].numpy()[0]))
-            circle = PostProcess(circle_list)
-            final_results_circle = final_results(circle)
-            for circles in final_results_circle:
-                cv2.circle(image_vis, (int(circles[0]), int(circles[1])), int(circles[2]), (0, 255, 0), 2)
-                cv2.putText(
-                    image_vis,
-                    text=f'X:{int(circles[0])},Y:{int(circles[1])},Radius: {int(circles[2])},Conf: {circles[3]:.2f},CLS: {circles[4]:.2f}',
-                    org=(int(circles[0])+10, int(circles[1])+10),
-                    fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                    fontScale=1.0,
-                    color=(0, 255, 0),  # BGR 格式：绿色
-                    thickness=2,
-                    lineType=cv2.LINE_AA  # 抗锯齿
-                )
+            # 替换原来的 resize 行
+            if img_shape.dim() == 2 and img_shape.shape[0] == 1:
+                # 处理 (1, 2) 情况
+                h_orig = int(img_shape[0, 0].item())
+                w_orig = int(img_shape[0, 1].item())
+            elif img_shape.dim() == 1 and img_shape.shape[0] == 2:
+                # 处理 (2,) 情况
+                h_orig = int(img_shape[0].item())
+                w_orig = int(img_shape[1].item())
+            else:
+                raise ValueError(f"Unexpected img_shape shape: {img_shape.shape}")
+
+            image_vis = cv2.resize(image_vis, dsize=(w_orig, h_orig))
+            final_results_circle = final_results(PostProcess, output=circle_list)
+
+            # 遍历每张图像的检测结果（batch 中的每个样本）
+            if final_results_circle is None:
+                print("Warning: final_results returned None. Skipping visualization.")
+                final_results_circle = []
+            for detections in final_results_circle:
+                # detections: Tensor of shape (N, 5) -> [x, y, r, score, class_id]
+                if detections.numel() == 0:
+                    continue  # 跳过无检测结果的情况
+
+                # 遍历该图像中的每一个检测到的圆
+                for det in detections:
+                    # 使用 .item() 将单元素张量转为 Python 标量
+                    x = int(det[0].item())
+                    y = int(det[1].item())
+                    r = int(det[2].item())
+                    conf = float(det[3].item())
+                    cls_id = float(det[4].item())
+
+                    # 绘制圆
+                    cv2.circle(image_vis, (x, y), r, (0, 255, 0), 2)
+
+                    # 添加文本标注
+                    cv2.putText(
+                        image_vis,
+                        text=f'X:{x},Y:{y},Radius:{r},Conf:{conf:.2f},CLS:{cls_id:.0f}',
+                        org=(x + 10, y + 10),
+                        fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                        fontScale=0.6,
+                        color=(0, 255, 0),
+                        thickness=1,
+                        lineType=cv2.LINE_AA
+                    )
 
             # image_vis =cv2.resize(image_vis, dsize=(img_shape[1], img_shape[0]))
             assert cv2.imwrite(output_file_name, image_vis)

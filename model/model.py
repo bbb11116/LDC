@@ -5,13 +5,22 @@ import cv2
 # from attentions.conv_pdc import Conv2d
 import numpy as np
 import torchvision
-from scipy.linalg.cython_lapack import sgebd2
+#from scipy.linalg.cython_lapack import sgebd2
 
 from model.lifting import LiftingScheme2D, WaveletHaar2D, WaveletHaar
 from attentions.ChannelAtt import ChannelAttention
 from utils.AF.Fsmish import smish as Fsmish
 from utils.AF.Xsmish import Smish
 from utils.yolo_circleLoss import *
+
+
+
+
+
+
+
+
+
 
 
 
@@ -331,7 +340,7 @@ class LDC_side_lifting(nn.Module):
         # results = [out_1, out_2, out_3, out_4, out_5, out_6]
         results = [out_1, out_2, out_3, out_4]
         pre = [block_1, block_3, block_4]
-        clrcle_model = CustomDetect(nc=80, ch=[16, 64, 96])
+        clrcle_model = CustomDetect(nc=80, ch=[16, 64, 96]).to(x.device)
         clrcle_results = clrcle_model(pre)
 
         # 将results中的每个结果保存为图像
@@ -415,48 +424,27 @@ class PostProcess:
         """
         # 1. 初始化一个列表，长度为 Batch_Size，用来存放每张图的结果
         batch_size = preds[0].shape[0]
-        output = [torch.zeros((0, 4), device=preds[0].device) for _ in range(batch_size)]
+        output = [torch.zeros((0, 5), device=preds[0].device) for _ in range(batch_size)]  # 修复：改为 (0, 5)
 
         # 遍历每一个尺度 (scale)
         for i, pred in enumerate(preds):
             stride = self.strides[i]
             B, C, H, W = pred.shape
-
             # 1. 维度变换: (B, 82, H, W) -> (B, H, W, 82)
             pred1 = pred.permute(0, 2, 3, 1)
-
             # 2. 分割通道: 前80是类别，后2是偏移量
-            # 假设你前向传播时，偏移量已经做过 Sigmoid 激活了，这里直接用
-            # 如果没做，这里需要: offsets = pred[..., 80:].sigmoid()
             cls_logits = pred1[..., :80]
             offsets = pred1[..., 80:]
-
             # 3. 计算置信度 (Sigmoid)
             scores = cls_logits.sigmoid()
-
-            # 4. 生成网格 (Grid)
-            # grid_x: [[0, 1, ...], [0, 1, ...]]
-            # grid_y: [[0, 0, ...], [1, 1, ...]]
-            device = pred.device
-            grid_y, grid_x = torch.meshgrid(
-                torch.arange(H, device=device),
-                torch.arange(W, device=device),
-                indexing='ij'
-            )
-
-            # 5. 解码坐标 (Decoding)
-            # 公式: (网格索引 + 偏移量) * 步长
-            # 假设 offsets 是 (dx, dy) 且在 0-1 之间
-            pred_x = (grid_x + offsets[..., 0]) * stride
-            pred_y = (grid_y + offsets[..., 1]) * stride
-            anchor_points, stride_tensor = make_anchors(pred, stride, 0.5)
-            pred_circles = YoloCircleLoss.clrcle_decode(anchor_points, pred1.view(B, -1, 2)).view(B, H, W, 3)
+            anchor_points, stride_tensor = make_anchor(pred, stride, 0.5)
+            yoloCircleLoss = YoloCircleLoss()
+            pred_circles = yoloCircleLoss.clrcle_decode(anchor_points, offsets.reshape(B, -1, 2)).reshape(B, H, W, 3)
 
             # 6. 整合当前尺度的结果
-            # 我们需要把所有结果展平: (B, N, 4) -> (x, y, score, class_id)
             # 找到每个网格中分数最大的类别
             max_scores, class_ids = scores.max(dim=-1)  # (B, H, W)
-            # 筛选大于阈值的点 (为了加速，这里可以先用 mask 筛选)
+            # 筛选大于阈值的点
             mask = max_scores > self.conf_thres
 
             for b in range(batch_size):
@@ -465,20 +453,26 @@ class PostProcess:
                 if b_mask.sum() == 0:
                     continue
 
-                # 提取数据
-                valid_x, valid_y, valid_r = pred_circles[b][b_mask]
-                valid_scores = max_scores[b][b_mask]
-                valid_classes = class_ids[b][b_mask]
-                # 堆叠结果: [x, y, score, class_id]
-                # shape: (Num_Valid, 4)
-                dets = torch.stack([valid_x, valid_y,valid_r ,valid_scores, valid_classes.float()], dim=1)
+                # 修复：不要直接解包 pred_circles[b][b_mask]
+                # 因为 pred_circles[b][b_mask] 的形状是 (N, 3)，不能直接解包成三个变量
+                filtered_circles = pred_circles[b][b_mask]  # (N, 3)
 
-                # 添加 batch 索引以便后续区分 (可选)
-                # >>> 关键步骤: 将当前尺度的结果拼接到该图片的总结果中 <<<
+                # 从 (N, 3) 中分别提取 x, y, r
+                valid_x = filtered_circles[:, 0]  # (N,)
+                valid_y = filtered_circles[:, 1]  # (N,)
+                valid_r = filtered_circles[:, 2]  # (N,)
+
+                valid_scores = max_scores[b][b_mask]  # (N,)
+                valid_classes = class_ids[b][b_mask]  # (N,)
+
+                # 堆叠结果: [x, y, r, score, class_id] -> (Num_Valid, 5)
+                dets = torch.stack([valid_x, valid_y, valid_r, valid_scores, valid_classes.float()], dim=1)
+
+                # 关键步骤: 将当前尺度的结果拼接到该图片的总结果中
                 output[b] = torch.cat((output[b], dets), dim=0)
 
-        # 这里只是简单的演示，实际需要对 batch 内每个样本做 NMS
         # 返回 list of tensors，每个 tensor 对应一张图的检测结果
+        # 每个 tensor 的形状是 (num_detections, 5) -> [x, y, r, score, class_id]
         return output
 
 
@@ -503,14 +497,40 @@ def standard_nms_with_fixed_size(detections, fixed_size=40, iou_thres=0.45):
 
     boxes = torch.stack([x1, y1, x2, y2], dim=1)
 
+    # 确保 boxes 的坐标是非负的，并且 x2 > x1, y2 > y1
+    boxes = torch.clamp(boxes, min=0)
+    boxes[:, 2] = torch.max(boxes[:, 2], boxes[:, 0] + 1e-6)  # x2 > x1
+    boxes[:, 3] = torch.max(boxes[:, 3], boxes[:, 1] + 1e-6)  # y2 > y1
+
+    # 转换数据类型为 float32
+    boxes = boxes.to(dtype=torch.float32, device=boxes.device)
+    scores = scores.to(dtype=torch.float32, device=scores.device)
+
+    # 限制处理的数量，避免内存问题
+    if len(scores) > fixed_size:
+        _, topk_indices = scores.topk(min(fixed_size, len(scores)))
+        boxes = boxes[topk_indices]
+        scores = scores[topk_indices]
+        detections = detections[topk_indices]
+
     # 使用官方 NMS
     keep_indices = torchvision.ops.nms(boxes, scores, iou_thres)
 
     return detections[keep_indices]
 
-def final_results(output):
+
+
+
+
+
+
+def final_results(PostProcess,output):
+    if not output:
+        return []
     final_results = []
-    for img_dets in output:
+    postprocessor = PostProcess()
+    detections = postprocessor(output)
+    for img_dets in detections:
         # img_dets: (Total_N, 4)
         if img_dets.shape[0] == 0:
             final_results.append(img_dets)
@@ -525,26 +545,3 @@ def final_results(output):
 
 
 
-if __name__ == '__main__':
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    import torchvision.transforms.functional as TF
-    from torchvision import transforms
-    model = LDC_side_lifting().to(device)
-    image = cv2.imread('./8_4.png')
-    # 调整图像尺寸
-    # image = cv2.resize(image, (256, 256))  # 调整为256x256的尺寸
-    # 将图像从BGR格式转换为RGB格式
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    # 转换为张量
-    transform = transforms.Compose([
-        transforms.ToTensor(),  # 将图像转换为张量
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])])  # 标准化张量
-    img = transform(image).unsqueeze(0)  # 在第0维添加一个维度，以匹配原始代码中的形状
-    img = img.cuda()
-
-    out = model(img)
-    for i, result in enumerate(out):
-        result = result.squeeze(0)
-        result = TF.to_pil_image(result)
-        result.save(f'./result_{i}.png')

@@ -103,12 +103,13 @@ class TestDataset(Dataset):
         p = Path(image_path)
         file_name = p.name
         img_info = self.data['images'][file_name]
-        w = img_info['imageSize']['width']
-        h = img_info['imageSize']['height']
-        shape = torch.tensor([h, w])
+        w = torch.tensor(img_info['imageSize']['width'], dtype=torch.float32)
+        h = torch.tensor(img_info['imageSize']['height'], dtype=torch.float32)
+        shape = torch.tensor([h, w], dtype=torch.float32)
         # 2. 获取圆的信息 [cx, cy, r]
         circles_data = img_info['circles']
-        circles_id = img_info['circles_id']
+        circles_id_raw = img_info.get("circles_id", 0)  # 默认类别 0
+        circles_id = torch.tensor(circles_id_raw, dtype=torch.float32)
         circles = []
         for c in circles_data:
             circles.append([c['cx'] / w, c['cy'] / h, c['r'] / torch.sqrt(w ** 2 + h ** 2)])
@@ -147,8 +148,9 @@ class TestDataset(Dataset):
             images=image,
             labels=label,
             file_names=file_name,
+            im_file=file_name,
             image_shape=im_shape,
-            shapes=shape,
+            shape=shape,
             circles=circles,
             cls=cls
         )
@@ -292,16 +294,17 @@ class BipedDataset(Dataset):
 
     def __getitem__(self, idx):
         # get data sample
-        image_path, label_path, circles = self.data_index[idx]
+        image_path, label_path = self.data_index[idx]
         p = Path(image_path)
         file_name = p.name
         img_info = self.data['images'][file_name]
-        w = img_info['imageSize']['width']
-        h = img_info['imageSize']['height']
-        shape = torch.tensor([h, w])
+        w = torch.tensor(img_info['imageSize']['width'], dtype=torch.float32)
+        h = torch.tensor(img_info['imageSize']['height'], dtype=torch.float32)
+        shape = torch.tensor([h, w], dtype=torch.float32)
         # 2. 获取圆的信息 [cx, cy, r]
         circles_data = img_info['circles']
-        circles_id = img_info['circles_id']
+        circles_id_raw = img_info.get("circles_id", 0)  # 默认类别 0
+        circles_id = torch.tensor(circles_id_raw, dtype=torch.float32)
         circles = []
         for c in circles_data:
             circles.append([c['cx'] / w, c['cy'] / h, c['r'] / torch.sqrt(w ** 2 + h ** 2)])
@@ -320,7 +323,7 @@ class BipedDataset(Dataset):
 
 
         image, label = self.transform(img=image, gt=label)
-        return dict(im_file=file_name, shape=shape, images=image, labels=label, circles=circles, cls=cls)
+        return dict(file_names=file_name,im_file=file_name, shape=shape, images=image, labels=label, circles=circles, cls=cls)
 
     def transform(self, img, gt):
         gt = np.array(gt, dtype=np.float32)

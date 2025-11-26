@@ -1,14 +1,15 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from tal import *
+
+from utils.tal import *
 
 
 
 
 class YoloCircleLoss(nn.Module):
-
     def __init__ (self, tal_topk: int = 10):
+        super().__init__()
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
         self.stride = [2, 4, 8]
@@ -20,7 +21,6 @@ class YoloCircleLoss(nn.Module):
 
         self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
         self.circle_loss = CircleLoss().to(device)
-        self.proj = torch.arange(self.reg_max, dtype=torch.float, device=device)
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor):
         """通过转换为张量格式并缩放坐标来预处理目标。"""
@@ -36,7 +36,13 @@ class YoloCircleLoss(nn.Module):
                 matches = i == j
                 if n := matches.sum():
                     out[j, :n] = targets[matches, 1:]
-            out[..., 1:4] = out[..., 1:4].mul_(scale_tensor)
+            W, H = scale_tensor[0], scale_tensor[1]  # 因为 scale_tensor = [W, H, W, H]
+            diag = torch.sqrt(W ** 2 + H ** 2)
+            circle_scale = torch.stack([W, H, diag])  # shape (3,)
+
+            # 缩放 x, y, r
+            out[..., 1:4] = out[..., 1:4] * circle_scale  # 或 .mul(circle_scale)
+            #out[..., 1:4] = out[..., 1:4].mul_(scale_tensor)
         return out
 
 

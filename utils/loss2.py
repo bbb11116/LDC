@@ -4,14 +4,14 @@ import torch.nn.functional as F
 import math
 import torch.fft as fft
 from fontTools.ttLib.tables.D__e_b_g import table_D__e_b_g
-from paddle.base.libpaddle.eager.ops.legacy import sigmoid
+#from paddle.base.libpaddle.eager.ops.legacy import sigmoid
 
 #input:[4,H,W] targets:[N,4]
 def regression_loss(inputs, targets):
     inputs = inputs.float()
     targets = targets.float()
-    inputs = sigmoid(inputs)
-    targets = sigmoid(targets)
+    inputs = F.sigmoid(inputs)
+    targets = F.sigmoid(targets)
     for i in range(targets.shape[0]):
         criterion = nn.MSELoss()
         loss = criterion(inputs[i], targets[i])

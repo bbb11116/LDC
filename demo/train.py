@@ -2,6 +2,9 @@
 from __future__ import print_function
 
 import argparse
+import cv2
+import os
+import numpy as np
 import time, platform
 import matplotlib.pyplot as plt
 from tqdm import tqdm
@@ -12,7 +15,7 @@ from torch.utils.data import DataLoader
 from utils.dataset_all import *
 from utils.circle_dataset import *
 from utils.loss2 import *
-from model.modelB4_side_lifting_2 import LDC_side_lifting
+from model.model import LDC_side_lifting
 from utils.img_processing import (save_image_batch_to_disk,
                                   visualize_result, count_parameters)
 from utils.yolo_circleLoss import YoloCircleLoss
@@ -41,9 +44,10 @@ def train_one_epoch(epoch, dataloader, model, criterions, optimizer, device,
         preds_list,circle_list = model(images)
         assert len(preds_list) == len(l_weight), "长度不匹配"
 
-        loss_4 = sum([criterion4(preds, labels, l_w) for preds, l_w in zip(preds_list[:-1], l_weight0)])  # bdcn_loss2 [1,2,3] TEED
+        loss_4 = sum([criterion4(torch.sigmoid(preds), labels, l_w) for preds, l_w in zip(preds_list[:-1], l_weight0)])  # bdcn_loss2 [1,2,3] TEED
         loss_1 = criterion1(preds_list[-1], labels, l_weight[-1], device)  # cats_loss [dfuse] TEED
-        loss_5 = criterion5(preds = circle_list, batch = sample_batched)  # yolo_circleLoss [dfuse] TEED
+        loss_5 = criterion5(preds = circle_list, batch = sample_batched)[0] # yolo_circleLoss [dfuse] TEED
+        loss_5 = loss_5.mean()*0.0000001  # 或 .sum()
 
 
 
@@ -52,7 +56,8 @@ def train_one_epoch(epoch, dataloader, model, criterions, optimizer, device,
         #loss_3 = sum([criterion2(preds, labels, l_w, device) for preds, l_w in zip(preds_list, l_weight0)])
         loss_2 = criterion2(preds_list[-1], labels, l_weight0[-1], device)
         #loss_4 = sum([criterion3(preds, labels, lweight = l_w) for preds, l_w in zip(preds_list, l_weight0)])
-        loss = (loss_1 + loss_4 + loss_2*0.25 + loss_5)
+        loss = (loss_1 + loss_4 + loss_2*0.25)*5 + loss_5
+
 
         optimizer.zero_grad()   # 将梯度归零
         loss.backward()         # 反向传播计算每个参数的梯度值
@@ -123,20 +128,20 @@ def validate_one_epoch(criterions, dataloader, model, device, output_dir, arg=No
         for _, sample_batched in enumerate(dataloader):
             images = sample_batched['images'].to(device)
             labels = sample_batched['labels'].to(device)
-            file_names = sample_batched['file_names']
-            image_shape = sample_batched['image_shape']
+            file_names = sample_batched['im_file']
+            image_shape = sample_batched['shape']
             preds_list,circle_list = model(images)
-
-            loss_4 = sum([criterion4(preds, labels, l_w) for preds, l_w in zip(preds_list[:-1], l_weight0)])  # bdcn_loss2 [1,2,3] TEED
+            loss_4 = sum([criterion4(torch.sigmoid(preds), labels, l_w) for preds, l_w in zip(preds_list[:-1], l_weight0)])  # bdcn_loss2 [1,2,3] TEED
             loss_1 = criterion1(preds_list[-1], labels, l_weight[-1], device)  # cats_loss [dfuse] TEED
-            loss_5 = criterion5(preds = circle_list, batch = sample_batched)
+            loss_5 = criterion5(preds = circle_list, batch = sample_batched)[0]
+            loss_5 = loss_5.mean()*0.0000001
 
             # loss = sum([criterion2(preds, labels,l_w) for preds, l_w in zip(preds_list[:-1],l_weight0)]) # bdcn_loss2
             # loss_1 = sum([criterion1(preds, labels, l_w, device) for preds, l_w in zip(preds_list, l_weight)])  # cats_loss   计算损失
             # loss_3 = sum([criterion2(preds, labels, l_w, device) for preds, l_w in zip(preds_list, l_weight0)])
             loss_2 = criterion2(preds_list[-1], labels, l_weight0[-1], device)
             # loss_4 = sum([criterion3(preds, labels, lweight = l_w) for preds, l_w in zip(preds_list, l_weight0)])
-            loss = (loss_1 + loss_4 + loss_2*0.25 + loss_5)
+            loss = (loss_1 + loss_4 + loss_2*0.25)*5 + loss_5
             val_loss_avg.append(loss.item())
             # print('pred shape', preds[0].shape)
             # 将预测的结果图像存储到对应的文件中
@@ -243,7 +248,7 @@ def parse_args():
 
     parser.add_argument('--input_dir',        #训练数据路径
                         type=str,
-                        default=r'F:\CS\ys\YS\Model training\Data\data_con',
+                        default=r'F:\Data\data_test',
                         help='the path to the directory with the input data.')
     parser.add_argument('--json_train',  # 训练数据路径
                         type=str,
@@ -255,11 +260,11 @@ def parse_args():
                         help='the path to the json file.')
     parser.add_argument('--output_dir',    #训练结果路径
                         type=str,
-                        default='checkpoints/checkpoints_ALL_9.30',
+                        default='checkpoints/checkpoints_circle',
                         help='the path to output the results.')
     parser.add_argument('--train_data',
                         type=str,
-                        default='data_con',
+                        default='data_test',
                         help='Name of the dataset.')
     parser.add_argument('--test_list',
                         type=str,
@@ -286,7 +291,7 @@ def parse_args():
                         help='use previous trained data')  # 是否使用之前的训练数据
     parser.add_argument('--checkpoint_data',
                         type=str,
-                        default=r'D:\yingsu\train\CS_LDC_1\demo\checkpoints\checkpoints_ALL_9.18\ALL\43\43_model.pth',# 权重路径
+                        default=r'"F:\checkpoints\all_9_30.pth"',# 权重路径
                         # 权重路径
                         help='Checkpoint path.')
     parser.add_argument('--checkpoint_data1',
@@ -311,16 +316,16 @@ def parse_args():
                         help='The NO B to wait before printing test predictions. 200')
     parser.add_argument('--epochs',
                         type=int,
-                        default=50,
+                        default=500,
                         metavar='N',
                         help='Number of training epochs (default: 25).')  # 训练总轮次
-    parser.add_argument('--lr', default=8e-4, type=float, #5e-5
+    parser.add_argument('--lr', default=5e-5, type=float, #5e-5
                         help='Initial learning rate. =5e-5') # 初始学习率
-    parser.add_argument('--lrs', default=[4e-4,1e-4,1e-5], type=float,
+    parser.add_argument('--lrs', default=[4e-5,2e-5,1e-5], type=float,
                         help='LR for set epochs')
     parser.add_argument('--wd', type=float, default=0., metavar='WD',
                         help='weight decay (Good 5e-6)')
-    parser.add_argument('--adjust_lr', default=[5,10,30], type=int,
+    parser.add_argument('--adjust_lr', default=[100,300,400], type=int,
                         help='Learning rate step size.')  # [6,9,19] # 调整学习率的epoch节点
     parser.add_argument('--version_notes',
                         default='LDC-BIPED: B4 Exp 67L3 xavier init normal+ init normal CatsLoss2 Cofusion',
@@ -328,7 +333,7 @@ def parse_args():
                         help='version notes')
     parser.add_argument('--batch_size',
                         type=int,
-                        default=4,
+                        default=2,
                         metavar='B',
                         help='the mini-batch size (default: 8)')
     parser.add_argument('--workers',
@@ -402,6 +407,7 @@ def main(args):
 
     # Instantiate model and move it to the computing device
     model = LDC_side_lifting().to(device)    # 通过调用 .to(device) 方法，模型的参数和缓存将被移动到指定的设备上，以便在该设备上进行计算
+    model = model.to(device)
     # model = nn.DataParallel(model)
     ini_epoch =0
     if not args.is_testing:     # 训练过程的数据loader
@@ -412,7 +418,7 @@ def main(args):
             model.load_state_dict(torch.load(args.checkpoint_path,
                                          map_location=device))
         dataset_train = BipedDataset(args.input_dir,
-                                     os.path.join(args.output_dir,args.train_data,args.json_train),
+                                     os.path.join(args.input_dir,args.json_train),
                                      img_width=args.img_width,
                                      img_height=args.img_height,
                                      mean_bgr=args.mean_pixel_values[0:3] if len(
@@ -427,7 +433,7 @@ def main(args):
                                       num_workers=args.workers,
                                       collate_fn=custom_collate_fn)
     dataset_val = TestDataset(args.input_dir,
-                              os.path.join(args.output_dir,args.train_data,args.json_test),
+                              os.path.join(args.input_dir,args.json_test),
                               test_data=args.train_data,
                               img_width=args.test_img_width,
                               img_height=args.test_img_height,
@@ -439,7 +445,8 @@ def main(args):
     dataloader_val = DataLoader(dataset_val,
                                 batch_size=1,
                                 shuffle=False,
-                                num_workers=args.workers)
+                                num_workers=args.workers,
+                                collate_fn=custom_collate_fn)
     # Testing
     if args.is_testing:
 

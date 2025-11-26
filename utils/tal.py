@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
-
-
+import torchvision
 
 
 class TaskAlignedAssigner(nn.Module):
@@ -182,8 +181,8 @@ class TaskAlignedAssigner(nn.Module):
         # (b, max_num_obj, 1, 4), (b, 1, h*w, 4)
         pd_circles = pd_circles.unsqueeze(1).expand(-1, self.n_max_boxes, -1, -1)[mask_gt]#(bs,max_objects,2550000,3)*mask_gt->(bs*max_objects*2550000,3)
         gt_circles = gt_circles.unsqueeze(2).expand(-1, -1, na, -1)[mask_gt]#(bs,max_objects,2550000,3)*mask_gt->(bs*max_objects*2550000,3)
-        overlaps[mask_gt] = circle_ious(gt_circles, pd_circles,na)#(bs,max_objects,2550000) 计算真实圆与预测圆的IOU
-        distence[mask_gt] = center_distanceLoss(gt_circles, pd_circles,na)#(bs,max_objects,2550000) 计算真实圆与预测圆圆心的距离
+        overlaps[mask_gt] = circle_ious(gt_circles, pd_circles)#(bs,max_objects,2550000) 计算真实圆与预测圆的IOU
+        distence[mask_gt] = center_distanceLoss(gt_circles, pd_circles)#(bs,max_objects,2550000) 计算真实圆与预测圆圆心的距离
 
         align_metric = circles_scores.pow(self.alpha) * overlaps.pow(self.beta) * distence.pow(self.beta)
         return align_metric, overlaps, distence #(bs,max_objects,2550000) 对齐度量  (bs,max_objects,2550000) IOU (bs,max_objects,2550000) 中心距离损失
@@ -332,7 +331,7 @@ class TaskAlignedAssigner(nn.Module):
 
 
 
-def center_distanceLoss(self, gt_circles, pd_circles,na):
+def center_distanceLoss(gt_circles, pd_circles,):
     """计算真实圆与预测圆的中心距离损失
 
     Args:
@@ -347,36 +346,32 @@ def center_distanceLoss(self, gt_circles, pd_circles,na):
     d = torch.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)  # (bs*max_objects*2550000, 1)
     r = r1 + r2  # (bs*max_objects*2550000, 1)
     distance = torch.clamp((r - d) / r, min=0)  # (bs*max_objects*2550000, 1)
-    return distance.squeeze(1).view(self.bs, self.n_max_boxes, na)
+    return distance.squeeze(1)
 
-def circle_ious(self, gt_circles, pd_circles,na):
+
+def circle_ious(gt_circles: torch.Tensor, pd_circles: torch.Tensor) -> torch.Tensor:
     """
-    🚀 闪电侠级圆交并比（IoU）计算（专为超大批次设计）
+    Compute IoU for M pairs of circles.
     Args:
-        gt_circles: (N, 3) -> [x, y, r] for ground truth
-        pd_circles: (N, 3) -> [x, y, r] for predictions
-        N = bs * max_objects * 2550000 (任意大小)
-
+        gt_circles: (M, 3) [x, y, r]
+        pd_circles: (M, 3) [x, y, r]
     Returns:
-        iou: (N,) IoU 值 (0~1)
+        iou: (M,) float tensor in [0, 1]
     """
-    # 1️⃣ 提取圆心和半径（0开销切片）
-    c0 = gt_circles[:, :2]  # (N, 2)
-    r0 = gt_circles[:, 2]  # (N,)
-    c1 = pd_circles[:, :2]  # (N, 2)
-    r1 = pd_circles[:, 2]  # (N,)
-    # 2️⃣ 核心：高效计算交集面积（复用之前优化版）
-    inter_area = self.circle_intersection_area_tensor(c0, r0, c1, r1)
-    # 3️⃣ 计算并集面积 = 圆1面积 + 圆2面积 - 交集面积
-    area0 = torch.pi * r0 ** 2
-    area1 = torch.pi * r1 ** 2
-    union_area = area0 + area1 - inter_area
-    # 4️⃣ 计算 IoU (安全处理除以0)
-    iou = inter_area / union_area
-    iou = torch.where(union_area > 0, iou, torch.zeros_like(iou))
-    return iou.view(self.bs, self.n_max_boxes, na)
+    c0 = gt_circles[:, :2]      # (M, 2)
+    r0 = gt_circles[:, 2]       # (M,)
+    c1 = pd_circles[:, :2]      # (M, 2)
+    r1 = pd_circles[:, 2]       # (M,)
 
-def circle_intersection_area_tensor(self,c0, r0, c1, r1):
+    inter_area = circle_intersection_area_tensor(c0, r0, c1, r1)
+    area0 = torch.pi * r0.square()
+    area1 = torch.pi * r1.square()
+    union_area = area0 + area1 - inter_area
+
+    iou = torch.where(union_area > 0, inter_area / union_area, torch.zeros_like(inter_area))
+    return iou  # shape: (M,)
+
+def circle_intersection_area_tensor(c0, r0, c1, r1):
     """（同前，已优化到效率天花板）"""
     d = torch.linalg.norm(c0 - c1, dim=-1)
     no_inter = d >= r0 + r1
@@ -416,10 +411,29 @@ def circle_intersection_area_tensor(self,c0, r0, c1, r1):
     return area
 
 
+import torch
+
+import torch
+
+import torch
 
 
+def make_anchor(feats, stride, grid_cell_offset=0.5):
+    """Generate anchors from features for a batch."""
+    B, _,H, W = feats.shape  # Assuming feats is of shape [B, C, H, W]
+    dtype, device = feats.dtype, feats.device
 
+    sx = (torch.arange(0, W, device=device, dtype=dtype) + grid_cell_offset)
+    sy = (torch.arange(0, H, device=device, dtype=dtype) + grid_cell_offset)
 
+    sy, sx = torch.meshgrid(sy, sx, indexing="ij")
+    anchor_points = torch.stack((sx, sy), -1)  # Shape [H, W, 2]
+
+    # Reshape to [1, H*W, 2] and repeat along batch dimension
+    anchor_points_batch = anchor_points.view(1, -1, 2).repeat(B, 1, 1)
+    stride_tensor_batch = torch.full((B, H * W, 1), stride, dtype=dtype, device=device)
+
+    return anchor_points_batch, stride_tensor_batch
 
 def make_anchors(feats, strides, grid_cell_offset=0.5):
     """Generate anchors from features."""
@@ -444,6 +458,7 @@ def dist2circle(distance, anchor_points, dim=-1):
     b = r
     lt = torch.cat((l, t), dim)
     rb = torch.cat((r, b), dim)
+    #print(rb.shape , anchor_points.shape)
     x1y1 = anchor_points - lt # (8, 2550000, 2)
     x2y2 = anchor_points + rb # (8, 2550000, 2)
     xy = (x1y1 + x2y2) / 2
@@ -452,3 +467,5 @@ def dist2circle(distance, anchor_points, dim=-1):
     #rec = torch.cat((x1y1, x2y2), dim)
 
     return torch.cat((xy, r), dim)  # xyr circle
+
+
