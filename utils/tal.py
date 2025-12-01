@@ -17,7 +17,7 @@ class TaskAlignedAssigner(nn.Module):
         eps (float): A small value to prevent division by zero.
     """
 
-    def __init__(self, topk: int = 13, num_classes: int = 80, alpha: float = 1.0, beta: float = 6.0, eps: float = 1e-9):
+    def __init__(self, topk: int = 13,  alpha: float = 1.0, beta: float = 6.0, eps: float = 1e-9):
         """Initialize a TaskAlignedAssigner object with customizable hyperparameters.
 
         Args:
@@ -29,13 +29,13 @@ class TaskAlignedAssigner(nn.Module):
         """
         super().__init__()
         self.topk = topk
-        self.num_classes = num_classes
+        #self.num_classes = num_classes
         self.alpha = alpha
         self.beta = beta
         self.eps = eps
 
     @torch.no_grad()
-    def forward(self, pd_scores, pd_circles, anc_points, gt_labels, gt_bboxes, mask_gt):
+    def forward(self,  pd_circles, anc_points, gt_labels, gt_circles, mask_gt):
         """Compute the task-aligned assignment.
 
         Args:
@@ -56,30 +56,26 @@ class TaskAlignedAssigner(nn.Module):
         References:
             https://github.com/Nioolek/PPYOLOE_pytorch/blob/master/ppyoloe/assigner/tal_assigner.py
         """
-        self.bs = pd_scores.shape[0]
-        self.n_max_boxes = gt_bboxes.shape[1]
-        device = gt_bboxes.device
+        self.bs = pd_circles.shape[0]
+        self.n_max_boxes = gt_circles.shape[1]
+        device = gt_circles.device
 
         if self.n_max_boxes == 0:
             return (
-                torch.full_like(pd_scores[..., 0], self.num_classes),
-                torch.zeros_like(pd_circles),
-                torch.zeros_like(pd_scores),
-                torch.zeros_like(pd_scores[..., 0]),
-                torch.zeros_like(pd_scores[..., 0]),
+                torch.zeros_like(pd_circles)
             )
 
         try:
-            return self._forward(pd_scores, pd_circles, anc_points, gt_labels, gt_bboxes, mask_gt)
+            return self._forward(pd_circles, anc_points, gt_labels, gt_circles, mask_gt)
         except torch.cuda.OutOfMemoryError:
             # Move tensors to CPU, compute, then move back to original device
             #LOGGER.warning("CUDA OutOfMemoryError in TaskAlignedAssigner, using CPU")
-            cpu_tensors = [t.cpu() for t in (pd_scores, pd_circles, anc_points, gt_labels, gt_bboxes, mask_gt)]
+            cpu_tensors = [t.cpu() for t in (pd_circles, anc_points, gt_labels, gt_circles, mask_gt)]
             result = self._forward(*cpu_tensors)
             return tuple(t.to(device) for t in result)
 
 
-    def _forward(self, pd_scores, pd_circles, anc_points, gt_labels, gt_circles, mask_gt):
+    def _forward(self, pd_circles, anc_points, gt_labels, gt_circles, mask_gt):
         """Compute the task-aligned assignment.
 
         Args:
@@ -98,7 +94,7 @@ class TaskAlignedAssigner(nn.Module):
             target_gt_idx (torch.Tensor): Target ground truth indices with shape (bs, num_total_anchors).
         """
         mask_pos, align_metric, overlaps, distence= self.get_pos_mask(
-            pd_scores, pd_circles, gt_labels, gt_circles, anc_points, mask_gt
+            pd_circles, gt_labels, gt_circles, anc_points, mask_gt
         )  # mask_pos 与真实框匹配的topk个先验框的mask，形状为(bs, max_num_obj, h*w)；
         # align_metric 为真实框与先验框的对齐度量，形状为(bs, max_num_obj, h*w)；
         # overlaps 为预测框与真实框的iou，形状为(bs, max_num_obj, h*w)；
@@ -107,14 +103,14 @@ class TaskAlignedAssigner(nn.Module):
         # 选出topk个先验框中最高得分的的下标和掩码
         target_gt_idx, fg_mask, mask_pos = self.select_highest_overlaps(mask_pos, overlaps, self.n_max_boxes)
         # Assigned target
-        target_labels, target_circles, target_scores = self.get_targets(gt_labels, gt_circles, target_gt_idx, fg_mask)
+        target_circles = self.get_targets(gt_circles, target_gt_idx, fg_mask)
         # Normalize
         align_metric *= mask_pos
         pos_align_metrics = align_metric.amax(dim=-1, keepdim=True)  # b, max_num_obj
         pos_overlaps = (overlaps * mask_pos).amax(dim=-1, keepdim=True)  # b, max_num_obj
         norm_align_metric = (align_metric * pos_overlaps / (pos_align_metrics + self.eps)).amax(-2).unsqueeze(-1)
-        target_scores = target_scores * norm_align_metric
-        return target_labels, target_circles, target_scores, fg_mask.bool(), target_gt_idx
+        #target_scores = target_scores * norm_align_metric
+        return target_circles, fg_mask.bool(), target_gt_idx
 
 
 
@@ -125,7 +121,7 @@ class TaskAlignedAssigner(nn.Module):
 
 
 
-    def get_pos_mask(self, pd_scores, pd_circles, gt_labels, gt_circles, anc_points, mask_gt):
+    def get_pos_mask(self, pd_circles, gt_labels, gt_circles, anc_points, mask_gt):
         """Get positive mask for each ground truth circle.
 
         Args:
@@ -143,7 +139,7 @@ class TaskAlignedAssigner(nn.Module):
         """
         mask_in_gts = self.select_candidates_in_gts(anc_points, gt_circles)  # 找出真实框内的锚点（掩码）（8, max_objects, 2550000）
         # Get anchor_align metric, (b, max_num_obj, h*w)
-        align_metric, overlaps, distence = self.get_box_metrics(pd_scores, pd_circles, gt_labels, gt_circles, mask_in_gts * mask_gt)
+        align_metric, overlaps, distence = self.get_box_metrics(pd_circles, gt_labels, gt_circles, mask_in_gts * mask_gt)
         # Get topk_metric mask, (b, max_num_obj, h*w)
         mask_topk = self.select_topk_candidates(align_metric, topk_mask=mask_gt.expand(-1, -1, self.topk).bool())
         mask_pos = mask_topk * mask_in_gts * mask_gt
@@ -152,7 +148,7 @@ class TaskAlignedAssigner(nn.Module):
 
 
 
-    def get_box_metrics(self, pd_scores, pd_circles, gt_labels, gt_circles, mask_gt):
+    def get_box_metrics(self, pd_circles, gt_labels, gt_circles, mask_gt):
         """Compute alignment metric given predicted and ground truth circles.根据预测和真实的圆计算对齐度量
 
         Args:
@@ -170,13 +166,13 @@ class TaskAlignedAssigner(nn.Module):
         mask_gt = mask_gt.bool()  # b, max_num_obj, h*w
         overlaps = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_circles.dtype, device=pd_circles.device)#GT与预测框的IOU[bs,max_objects,2550000]
         distence = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_circles.dtype, device=pd_circles.device)
-        circles_scores = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_scores.dtype, device=pd_scores.device)#预测框得分[bs,max_objects,2550000]
+        #circles_scores = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_scores.dtype, device=pd_scores.device)#预测框得分[bs,max_objects,2550000]
 
         ind = torch.zeros([2, self.bs, self.n_max_boxes], dtype=torch.long)  # 2, b, max_num_obj
         ind[0] = torch.arange(end=self.bs).view(-1, 1).expand(-1, self.n_max_boxes)  # b, max_num_obj（表示批次索引）
         ind[1] = gt_labels.squeeze(-1)  # b, max_num_obj（表示真实框的类别）
         # Get the scores of each grid for each gt cls
-        circles_scores[mask_gt] = pd_scores[ind[0], :, ind[1]][mask_gt]  # b, max_num_obj, h*w
+        #circles_scores[mask_gt] = pd_scores[ind[0], :, ind[1]][mask_gt]  # b, max_num_obj, h*w
 
         # (b, max_num_obj, 1, 4), (b, 1, h*w, 4)
         pd_circles = pd_circles.unsqueeze(1).expand(-1, self.n_max_boxes, -1, -1)[mask_gt]#(bs,max_objects,2550000,3)*mask_gt->(bs*max_objects*2550000,3)
@@ -184,7 +180,7 @@ class TaskAlignedAssigner(nn.Module):
         overlaps[mask_gt] = circle_ious(gt_circles, pd_circles)#(bs,max_objects,2550000) 计算真实圆与预测圆的IOU
         distence[mask_gt] = center_distanceLoss(gt_circles, pd_circles)#(bs,max_objects,2550000) 计算真实圆与预测圆圆心的距离
 
-        align_metric = circles_scores.pow(self.alpha) * overlaps.pow(self.beta) * distence.pow(self.beta)
+        align_metric = overlaps.pow(self.beta) * distence.pow(self.alpha)
         return align_metric, overlaps, distence #(bs,max_objects,2550000) 对齐度量  (bs,max_objects,2550000) IOU (bs,max_objects,2550000) 中心距离损失
 
 
@@ -221,11 +217,11 @@ class TaskAlignedAssigner(nn.Module):
         return count_tensor.to(metrics.dtype)#将 count_tensor的数据类型转换为与输入 metrics一致后返回。
 
 
-    def get_targets(self, gt_labels, gt_circles, target_gt_idx, fg_mask):
-        """Compute target labels, target circles, and target scores for the positive anchor points.
+    def get_targets(self, gt_circles, target_gt_idx, fg_mask):
+        """Compute target circles for the positive anchor points.
 
         Args:
-            gt_labels (torch.Tensor): Ground truth labels of shape (b, max_num_obj, 1), where b is the batch size and
+            gt_circles (torch.Tensor): Ground truth circles of shape (b, max_num_obj, 3), where b is the batch size and
                 max_num_obj is the maximum number of objects.
             gt_circles (torch.Tensor): Ground truth circles of shape (b, max_num_obj, 3).
             target_gt_idx (torch.Tensor): Indices of the assigned ground truth objects for positive anchor points, with
@@ -239,28 +235,28 @@ class TaskAlignedAssigner(nn.Module):
             target_scores (torch.Tensor): Target scores for positive anchor points with shape (b, h*w, num_classes).
         """
         # Assigned target labels, (b, 1)
-        batch_ind = torch.arange(end=self.bs, dtype=torch.int64, device=gt_labels.device)[..., None]
+        batch_ind = torch.arange(end=self.bs, dtype=torch.int64, device=gt_circles.device)[..., None]
         target_gt_idx = target_gt_idx + batch_ind * self.n_max_boxes  # (b, h*w)
-        target_labels = gt_labels.long().flatten()[target_gt_idx]  # (b, h*w)
+        #target_labels = gt_labels.long().flatten()[target_gt_idx]  # (b, h*w)
 
         # Assigned target circles, (b, max_num_obj, 3) -> (b, h*w, 3)
         target_circles = gt_circles.view(-1, gt_circles.shape[-1])[target_gt_idx]
 
         # Assigned target scores
-        target_labels.clamp_(0)
+        #target_labels.clamp_(0)
 
         # 10x faster than F.one_hot()
-        target_scores = torch.zeros(
-            (target_labels.shape[0], target_labels.shape[1], self.num_classes),
-            dtype=torch.int64,
-            device=target_labels.device,
-        )  # (b, h*w, 80)
-        target_scores.scatter_(2, target_labels.unsqueeze(-1), 1)
+        # target_scores = torch.zeros(
+        #     (target_labels.shape[0], target_labels.shape[1], self.num_classes),
+        #     dtype=torch.int64,
+        #     device=target_labels.device,
+        # )  # (b, h*w, 80)
+        # target_scores.scatter_(2, target_labels.unsqueeze(-1), 1)
 
-        fg_scores_mask = fg_mask[:, :, None].repeat(1, 1, self.num_classes)  # (b, h*w, 80)
-        target_scores = torch.where(fg_scores_mask > 0, target_scores, 0)
+        #fg_scores_mask = fg_mask[:, :, None].repeat(1, 1, self.num_classes)  # (b, h*w, 80)
+        #target_scores = torch.where(fg_scores_mask > 0, target_scores, 0)
 
-        return target_labels, target_circles, target_scores
+        return target_circles
         # target_labels：正样本的类别标签（形状(b, h * w)）
         # target_circles：正样本对应的真实框坐标（形状(b, h * w, 3)）
         # target_scores：正样本的one - hot类别分数（形状(b, h * w, num_classes)）
@@ -454,6 +450,9 @@ def make_anchors(feats, strides, grid_cell_offset=0.5):
 def dist2circle(distance, anchor_points, dim=-1):
     """Transform distance(ltrb) to box(xywh or xyxy)."""
     l, r = distance.chunk(2, dim)
+    # 确保预测值为正数且有意义
+    l = torch.abs(l) * 50  # 缩放因子，根据图像尺寸调整
+    r = torch.abs(r) * 50
     t = l
     b = r
     lt = torch.cat((l, t), dim)
@@ -464,6 +463,7 @@ def dist2circle(distance, anchor_points, dim=-1):
     xy = (x1y1 + x2y2) / 2
     r = (x2y2 - x1y1) / 2 # (8, 2550000, 2)
     r = torch.mean(r, dim=-1, keepdim=True) # (8, 2550000, 1)
+    r = torch.clamp(r, min=5.0)  # 最小半径5个像素
     #rec = torch.cat((x1y1, x2y2), dim)
 
     return torch.cat((xy, r), dim)  # xyr circle

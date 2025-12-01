@@ -353,28 +353,17 @@ class LDC_side_lifting(nn.Module):
         return results ,clrcle_results
 
 
-
 class CustomDetect(nn.Module):
     def __init__(self, nc=80, ch=()):
         super().__init__()
-        self.nc = nc  # 类别数: 80
-        self.no = 2  # 你的特有偏移量: 2 (例如 dx, dy 或者 r, offset)
+        self.no = 2  # 只预测2个偏移量
 
-        # 你的输入通道列表: [16, 64, 96]
-        # 对应 strides: [2, 4, 8] (基于你的输入1200x1600和输出600x800推算)
-        self.sigmoid = nn.Sigmoid()
-        # 定义三个尺度的处理模块
+        # 定义三个尺度的回归分支
         self.cv2 = nn.ModuleList()  # 回归分支 (Regression Branch)
-        self.cv3 = nn.ModuleList()  # 分类分支 (Classification Branch)
-
 
         for x in ch:
-            # 1. 回归分支: 输入通道 -> 2个输出通道
-            # 这里使用 1x1 卷积直接映射，也可以先加 3x3 卷积增加非线性
+            # 回归分支: 输入通道 -> 2个输出通道
             self.cv2.append(nn.Conv2d(x, self.no, 1))
-
-            # 2. 分类分支: 输入通道 -> 80个输出通道
-            self.cv3.append(nn.Conv2d(x, self.nc, 1))
 
     def forward(self, x):
         """
@@ -385,100 +374,75 @@ class CustomDetect(nn.Module):
         """
         res = []
         for i in range(len(x)):
-            # 1. 计算分类分支 (B, 80, H, W)
-            cls_out = self.cv3[i](x[i])
-
-            # 2. 计算回归分支 (B, 2, H, W)
+            # 只计算回归分支 (B, 2, H, W)
             reg_out = self.cv2[i](x[i])
-            reg_out = self.sigmoid(reg_out)
 
-            # 3. 拼接 (Concatenate) -> (B, 80+2, H, W)
-            # dim=1 代表在通道维度拼接
-            out = torch.cat((cls_out, reg_out), 1)
+            res.append(reg_out)
 
-            res.append(out)
-
-        # 此时 res 包含了三个张量，形状完全符合你的要求：
-        # res[0]: (8, 82, 600, 800)
-        # res[1]: (8, 82, 300, 400)
-        # res[2]: (8, 82, 150, 200)
+        # 返回三个张量，每个张量只包含2个偏移量：
+        # res[0]: (B, 2, 600, 800)
+        # res[1]: (B, 2, 300, 400)
+        # res[2]: (B, 2, 150, 200)
         return res
 
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-
 class PostProcess:
-    def __init__(self, conf_thres=0.6, strides=[2, 4, 8]):
-        self.conf_thres = conf_thres
+    def __init__(self, strides=[2, 4, 8]):
         self.strides = strides  # 对应你的三层输出 stride
 
     def __call__(self, preds):
         """
         preds: 列表，包含三个 tensor
-               Scale 0: (B, 82, 600, 800)
-               Scale 1: (B, 82, 300, 400)
-               Scale 2: (B, 82, 150, 200)
+               Scale 0: (B, 2, 600, 800)
+               Scale 1: (B, 2, 300, 400)
+               Scale 2: (B, 2, 150, 200)
         """
         # 1. 初始化一个列表，长度为 Batch_Size，用来存放每张图的结果
         batch_size = preds[0].shape[0]
-        output = [torch.zeros((0, 5), device=preds[0].device) for _ in range(batch_size)]  # 修复：改为 (0, 5)
+        output = [torch.zeros((0, 4), device=preds[0].device) for _ in range(batch_size)]  # 改为 (0, 4)
 
         # 遍历每一个尺度 (scale)
         for i, pred in enumerate(preds):
             stride = self.strides[i]
             B, C, H, W = pred.shape
-            # 1. 维度变换: (B, 82, H, W) -> (B, H, W, 82)
-            pred1 = pred.permute(0, 2, 3, 1)
-            # 2. 分割通道: 前80是类别，后2是偏移量
-            cls_logits = pred1[..., :80]
-            offsets = pred1[..., 80:]
-            # 3. 计算置信度 (Sigmoid)
-            scores = cls_logits.sigmoid()
+            # 1. 维度变换: (B, 2, H, W) -> (B, H, W, 2)
+            offsets = pred.permute(0, 2, 3, 1)
+
+            # 2. 生成锚点
             anchor_points, stride_tensor = make_anchor(pred, stride, 0.5)
+
+            # 3. 解码偏移量得到圆参数
             yoloCircleLoss = YoloCircleLoss()
             pred_circles = yoloCircleLoss.clrcle_decode(anchor_points, offsets.reshape(B, -1, 2)).reshape(B, H, W, 3)
 
-            # 6. 整合当前尺度的结果
-            # 找到每个网格中分数最大的类别
-            max_scores, class_ids = scores.max(dim=-1)  # (B, H, W)
-            # 筛选大于阈值的点
-            mask = max_scores > self.conf_thres
-
+            # 4. 整合当前尺度的结果（不再筛选，全部保留）
             for b in range(batch_size):
-                # 获取当前 batch 中满足阈值的索引
-                b_mask = mask[b]
-                if b_mask.sum() == 0:
-                    continue
+                # 获取当前 batch 的所有预测圆
+                circles = pred_circles[b]  # (H, W, 3)
 
-                # 修复：不要直接解包 pred_circles[b][b_mask]
-                # 因为 pred_circles[b][b_mask] 的形状是 (N, 3)，不能直接解包成三个变量
-                filtered_circles = pred_circles[b][b_mask]  # (N, 3)
+                # 展平为 (H*W, 3)
+                circles_flat = circles.reshape(-1, 3)
 
-                # 从 (N, 3) 中分别提取 x, y, r
-                valid_x = filtered_circles[:, 0]  # (N,)
-                valid_y = filtered_circles[:, 1]  # (N,)
-                valid_r = filtered_circles[:, 2]  # (N,)
+                # 提取 x, y, r
+                valid_x = circles_flat[:, 0]  # (H*W,)
+                valid_y = circles_flat[:, 1]  # (H*W,)
+                valid_r = circles_flat[:, 2]  # (H*W,)
 
-                valid_scores = max_scores[b][b_mask]  # (N,)
-                valid_classes = class_ids[b][b_mask]  # (N,)
+                # 堆叠结果: [x, y, r, score=1.0] -> (H*W, 4)
+                # 由于移除了分类，我们给每个预测一个默认的置信度分数1.0
+                dets = torch.stack([valid_x, valid_y, valid_r, torch.ones_like(valid_x)], dim=1)
 
-                # 堆叠结果: [x, y, r, score, class_id] -> (Num_Valid, 5)
-                dets = torch.stack([valid_x, valid_y, valid_r, valid_scores, valid_classes.float()], dim=1)
-
-                # 关键步骤: 将当前尺度的结果拼接到该图片的总结果中
+                # 将当前尺度的结果拼接到该图片的总结果中
                 output[b] = torch.cat((output[b], dets), dim=0)
 
         # 返回 list of tensors，每个 tensor 对应一张图的检测结果
-        # 每个 tensor 的形状是 (num_detections, 5) -> [x, y, r, score, class_id]
+        # 每个 tensor 的形状是 (num_detections, 4) -> [x, y, r, score=1.0]
         return output
 
 
 def standard_nms_with_fixed_size(detections, fixed_size=40, iou_thres=0.45):
     """
-    detections: (N, 5) -> [x, y, r, score, class]
+    detections: (N, 4) -> [x, y, r, score]
     fixed_size: 假定的目标大小
     """
     if len(detections) == 0:
@@ -519,28 +483,26 @@ def standard_nms_with_fixed_size(detections, fixed_size=40, iou_thres=0.45):
     return detections[keep_indices]
 
 
-
-
-
-
-
-def final_results(PostProcess,output):
+def final_results(PostProcess, output):
     if not output:
         return []
+
     final_results = []
     postprocessor = PostProcess()
     detections = postprocessor(output)
+
     for img_dets in detections:
         # img_dets: (Total_N, 4)
         if img_dets.shape[0] == 0:
             final_results.append(img_dets)
             continue
 
-        # 使用之前提到的伪造 Box NMS 策略
-        # 输入: (Total_N, 5) -> 输出: (Keep_N, 5)
+        # 使用伪造 Box NMS 策略
+        # 输入: (Total_N, 4) -> 输出: (Keep_N, 4)
         keep_dets = standard_nms_with_fixed_size(img_dets, fixed_size=40)
         final_results.append(keep_dets)
-        return final_results
+
+    return final_results
 
 
 

@@ -14,12 +14,12 @@ class YoloCircleLoss(nn.Module):
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
         self.stride = [2, 4, 8]
         #self.reg_max = 16
-        self.nc = 80
-        self.no = self.nc +2
+        #self.nc = 80
+        self.no = 2
         self.device = device
         #self.use_dfl = self.reg_max > 1
 
-        self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
+        self.assigner = TaskAlignedAssigner(topk=tal_topk, alpha=0.5, beta=6.0)
         self.circle_loss = CircleLoss().to(device)
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor):
@@ -42,7 +42,7 @@ class YoloCircleLoss(nn.Module):
 
             # 缩放 x, y, r
             out[..., 1:4] = out[..., 1:4] * circle_scale  # 或 .mul(circle_scale)
-            #out[..., 1:4] = out[..., 1:4].mul_(scale_tensor)
+            # out[..., 1:4] = out[..., 1:4].mul_(scale_tensor)
         return out
 
 
@@ -59,30 +59,27 @@ class YoloCircleLoss(nn.Module):
 
 
     def __call__(self,  preds: list[torch.Tensor], batch: dict[str, torch.Tensor]):
-        loss = torch.zeros(3, device=self.device)  # box, cls, dfl
+        loss = torch.zeros(2, device=self.device)  # box, dfl
         feats = preds[1] if isinstance(preds, tuple) else preds
-        pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
-            (2, self.nc), 1)  # (8, 80+2, 2550000)
-        pred_scores = pred_scores.permute(0, 2, 1).contiguous()  # (8, 2550000, 80)
+        pred_distri = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2)
         pred_distri = pred_distri.permute(0, 2, 1).contiguous()  # (8, 2550000,  2)
 
-        dtype = pred_scores.dtype
-        batch_size = pred_scores.shape[0]
+        dtype = pred_distri.dtype
+        batch_size = pred_distri.shape[0]
         imgsz = torch.tensor(feats[0].shape[2:], device=self.device, dtype=dtype) * self.stride[0]  # image size (h,w)
         anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)  # (8,2550000,2), (8,2550000,1)
 
-        # Targets [这一个批次一共有多少个框，2+1+nc]
+        # Targets [这一个批次一共有多少个框，4]
         targets = torch.cat((batch["batch_idx"].view(-1, 1), batch["cls"].view(-1, 1), batch["circles"]), 1)
-        targets = self.preprocess(targets, batch_size, scale_tensor=imgsz[[1, 0, 1, 0]]) # (8, max_objects, 4)
-        gt_labels, gt_circles = targets.split((1, 3), 2)  # cls, xyr # (8, max_objects, 1), (8, max_objects, 3)
+        targets = self.preprocess(targets, batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])  # (8, max_objects, 4)
+        gt_labels, gt_circles = targets.split((1, 3), 2)
         mask_gt = gt_circles.sum(2, keepdim=True).gt_(0.0)
 
         # Pboxes
         pred_circles = self.clrcle_decode(anchor_points, pred_distri)  # xyr, (8, 2550000, 3)
 
-        _, target_circles, target_scores, fg_mask, _ = self.assigner(
+        target_circles, fg_mask, _ = self.assigner(
             # pred_scores.detach().sigmoid() * 0.8 + dfl_conf.unsqueeze(-1) * 0.2,
-            pred_scores.detach().sigmoid(),
             (pred_circles.detach() * stride_tensor).type(gt_circles.dtype),
             anchor_points * stride_tensor,
             gt_labels,
@@ -90,25 +87,22 @@ class YoloCircleLoss(nn.Module):
             mask_gt,
         )
 
-        target_scores_sum = max(target_scores.sum(), 1)
+        #target_scores_sum = max(target_scores.sum(), 1)
         # Cls loss
-        loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        #loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
 
         # Circle loss
         if fg_mask.sum():
-            loss[0], loss[2] = self.circle_loss(
+            loss[0], loss[1] = self.circle_loss(
                 pred_distri,
                 pred_circles,
                 anchor_points,
                 target_circles / stride_tensor,
-                target_scores,
-                target_scores_sum,
                 fg_mask,
             )
 
-        loss[0] *= 0.3  # box gain
-        loss[1] *= 0.7  # cls gain
-        loss[2] *= 0.3  # dfl gain
+        loss[0] *= 0.9  # box gain
+        loss[1] *= 0.3  # dist gain
 
         return loss * batch_size, loss.detach()  # loss(box, cls, dfl)
 
@@ -125,17 +119,17 @@ class CircleLoss(nn.Module):
             pred_dist: torch.Tensor,
             pred_bboxes: torch.Tensor,
             anchor_points: torch.Tensor,
-            target_bboxes: torch.Tensor,
-            target_scores: torch.Tensor,
-            target_scores_sum: torch.Tensor,
+            target_circles: torch.Tensor,
+            #target_scores: torch.Tensor,
+            #target_scores_sum: torch.Tensor,
             fg_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute IoU and DFL losses for bounding boxes."""
-        weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
-        iou = circle_ious(pred_bboxes[fg_mask], target_bboxes[fg_mask])
-        distence = center_distanceLoss(pred_bboxes[fg_mask], target_bboxes[fg_mask])
-        loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
-        loss_dist = ((1.0 - distence) * weight).sum() / target_scores_sum
+        #weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
+        iou = circle_ious(pred_bboxes[fg_mask], target_circles[fg_mask])
+        distence = center_distanceLoss(pred_bboxes[fg_mask], target_circles[fg_mask])
+        loss_iou = ((1.0 - iou)).sum() / fg_mask.sum()
+        loss_dist = ((1.0 - distence)).sum() / fg_mask.sum()
 
 
         return loss_iou, loss_dist

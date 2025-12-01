@@ -44,7 +44,7 @@ def train_one_epoch(epoch, dataloader, model, criterions, optimizer, device,
         preds_list,circle_list = model(images)
         assert len(preds_list) == len(l_weight), "长度不匹配"
 
-        loss_4 = sum([criterion4(torch.sigmoid(preds), labels, l_w) for preds, l_w in zip(preds_list[:-1], l_weight0)])  # bdcn_loss2 [1,2,3] TEED
+        loss_4 = sum([criterion4(preds, labels, l_w) for preds, l_w in zip(preds_list[:-1], l_weight0)])  # bdcn_loss2 [1,2,3] TEED
         loss_1 = criterion1(preds_list[-1], labels, l_weight[-1], device)  # cats_loss [dfuse] TEED
         loss_5 = criterion5(preds = circle_list, batch = sample_batched)[0] # yolo_circleLoss [dfuse] TEED
         loss_5 = loss_5.mean()*0.0000001  # 或 .sum()
@@ -56,7 +56,7 @@ def train_one_epoch(epoch, dataloader, model, criterions, optimizer, device,
         #loss_3 = sum([criterion2(preds, labels, l_w, device) for preds, l_w in zip(preds_list, l_weight0)])
         loss_2 = criterion2(preds_list[-1], labels, l_weight0[-1], device)
         #loss_4 = sum([criterion3(preds, labels, lweight = l_w) for preds, l_w in zip(preds_list, l_weight0)])
-        loss = (loss_1 + loss_4 + loss_2*0.25)*5 + loss_5
+        loss = (loss_1 + loss_4 + loss_2*0.25)*9 + loss_5 * 2
 
 
         optimizer.zero_grad()   # 将梯度归零
@@ -131,7 +131,7 @@ def validate_one_epoch(criterions, dataloader, model, device, output_dir, arg=No
             file_names = sample_batched['im_file']
             image_shape = sample_batched['shape']
             preds_list,circle_list = model(images)
-            loss_4 = sum([criterion4(torch.sigmoid(preds), labels, l_w) for preds, l_w in zip(preds_list[:-1], l_weight0)])  # bdcn_loss2 [1,2,3] TEED
+            loss_4 = sum([criterion4(preds, labels, l_w) for preds, l_w in zip(preds_list[:-1], l_weight0)])  # bdcn_loss2 [1,2,3] TEED
             loss_1 = criterion1(preds_list[-1], labels, l_weight[-1], device)  # cats_loss [dfuse] TEED
             loss_5 = criterion5(preds = circle_list, batch = sample_batched)[0]
             loss_5 = loss_5.mean()*0.0000001
@@ -141,7 +141,7 @@ def validate_one_epoch(criterions, dataloader, model, device, output_dir, arg=No
             # loss_3 = sum([criterion2(preds, labels, l_w, device) for preds, l_w in zip(preds_list, l_weight0)])
             loss_2 = criterion2(preds_list[-1], labels, l_weight0[-1], device)
             # loss_4 = sum([criterion3(preds, labels, lweight = l_w) for preds, l_w in zip(preds_list, l_weight0)])
-            loss = (loss_1 + loss_4 + loss_2*0.25)*5 + loss_5
+            loss = (loss_1 + loss_4 + loss_2*0.25)*9 + loss_5 * 2
             val_loss_avg.append(loss.item())
             # print('pred shape', preds[0].shape)
             # 将预测的结果图像存储到对应的文件中
@@ -260,7 +260,7 @@ def parse_args():
                         help='the path to the json file.')
     parser.add_argument('--output_dir',    #训练结果路径
                         type=str,
-                        default='checkpoints/checkpoints_circle',
+                        default='checkpoints/checkpoints_circle_NOCLS',
                         help='the path to output the results.')
     parser.add_argument('--train_data',
                         type=str,
@@ -319,13 +319,13 @@ def parse_args():
                         default=500,
                         metavar='N',
                         help='Number of training epochs (default: 25).')  # 训练总轮次
-    parser.add_argument('--lr', default=5e-5, type=float, #5e-5
-                        help='Initial learning rate. =5e-5') # 初始学习率
-    parser.add_argument('--lrs', default=[4e-5,2e-5,1e-5], type=float,
+    parser.add_argument('--lr', default=5e-5, type=float,  # 5e-5
+                        help='Initial learning rate. =5e-5')  # 初始学习率
+    parser.add_argument('--lrs', default=[2e-5, 1e-5, 6e-6], type=float,
                         help='LR for set epochs')
     parser.add_argument('--wd', type=float, default=0., metavar='WD',
                         help='weight decay (Good 5e-6)')
-    parser.add_argument('--adjust_lr', default=[100,300,400], type=int,
+    parser.add_argument('--adjust_lr', default=[100, 300, 400], type=int,
                         help='Learning rate step size.')  # [6,9,19] # 调整学习率的epoch节点
     parser.add_argument('--version_notes',
                         default='LDC-BIPED: B4 Exp 67L3 xavier init normal+ init normal CatsLoss2 Cofusion',
@@ -333,7 +333,7 @@ def parse_args():
                         help='version notes')
     parser.add_argument('--batch_size',
                         type=int,
-                        default=2,
+                        default=4,
                         metavar='B',
                         help='the mini-batch size (default: 8)')
     parser.add_argument('--workers',

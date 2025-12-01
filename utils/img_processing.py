@@ -79,8 +79,8 @@ def save_image_batch_to_disk(tensor, circle_list, output_dir, file_names,
                     x = int(det[0].item())
                     y = int(det[1].item())
                     r = int(det[2].item())
-                    conf = float(det[3].item())
-                    cls_id = float(det[4].item())
+                    #conf = float(det[3].item())
+                    #cls_id = float(det[4].item())
 
                     # 绘制圆
                     cv2.circle(image_vis, (x, y), r, (0, 255, 0), 2)
@@ -88,7 +88,7 @@ def save_image_batch_to_disk(tensor, circle_list, output_dir, file_names,
                     # 添加文本标注
                     cv2.putText(
                         image_vis,
-                        text=f'X:{x},Y:{y},Radius:{r},Conf:{conf:.2f},CLS:{cls_id:.0f}',
+                        text=f'X:{x},Y:{y},Radius:{r}',
                         org=(x + 10, y + 10),
                         fontFace=cv2.FONT_HERSHEY_SIMPLEX,
                         fontScale=0.6,
@@ -204,13 +204,12 @@ def save_image_batch_to_disk(tensor, circle_list, output_dir, file_names,
             # Get the mean prediction of all the 7 outputs
             #average = np.array(preds, dtype=np.float32)
             #average = np.uint8(np.mean(average, axis=0))
-            circle = PostProcess(circle_list)
-            final_results_circle = final_results(circle)
+            final_results_circle = final_results(PostProcess, output=circle_list)
             for circles in final_results_circle:
                 cv2.circle(fuse, (int(circles[0]), int(circles[1])), int(circles[2]), (0, 255, 0), 2)
                 cv2.putText(
                     fuse,
-                    text=f'X:{int(circles[0])},Y:{int(circles[1])},Radius: {int(circles[2])},Conf: {circles[3]:.2f},CLS: {circles[4]:.2f}',
+                    text=f'X:{int(circles[0])},Y:{int(circles[1])},Radius: {int(circles[2])}',
                     org=(int(circles[0]) + 10, int(circles[1]) + 10),
                     fontFace=cv2.FONT_HERSHEY_SIMPLEX,
                     fontScale=1.0,
